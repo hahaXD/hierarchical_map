@@ -33,8 +33,8 @@ int main(int argc, const char *argv[]) {
   std::cout << "Vtree filename : " << vtree_filename << std::endl;
   MapNetwork *network =
       MapNetwork::MapNetworkFromJsonSpecFile(map_filename.c_str());
-  network->SetGraphillionCompiler(graph_hopper_script, tmp_dir, thread_num);
-  auto result = network->CompileConstraint();
+  auto result =
+      network->CompileConstraint(graph_hopper_script, tmp_dir, thread_num);
   std::cout << "Model Count"
             << psdd_node_util::ModelCount(
                    psdd_node_util::SerializePsddNodes(result.first))

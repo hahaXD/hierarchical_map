@@ -20,28 +20,40 @@ public:
   static MapNetwork *MapNetworkFromJsonSpecFile(const char *filename);
   static MapNetwork *MapNetworkFromJsonSpec(const json &json_spec);
   MapCluster *root_cluster() const;
+  std::unordered_map<std::string, MapCluster *> GetMapClustersByName() const;
   Graph *graph() { return graph_; }
   std::vector<MapCluster *> clusters() const { return clusters_; }
+
   // Returns a map whose value cluster contains the key edge as the internal
   // edge
   std::unordered_map<Edge *, MapCluster *> EdgeClusterMap() const;
-  std::pair<PsddNode *, PsddManager *> CompileConstraint() const;
-  // Compiler setting
-  void SetGraphillionCompiler(std::string graphillion_script,
-                              std::string tmp_dir, int thread_num);
+  std::pair<PsddNode *, PsddManager *>
+  CompileConstraint(const std::string &graphillion_script,
+                    const std::string &tmp_dir, int thread_num);
+
+  // Compiler methods
+  void
+  CompileLeafClustersUsingGraphillion(const std::string &graphillion_script,
+                                      const std::string &tmp_dir,
+                                      int thread_num);
+  // Set up Psdd Manager states.
+  void SetupPsddManager();
+  // Learning methods.
+  void LearnWithRoutes(const std::string &graphillion_script,
+                       const std::string &tmp_dir, int thread_num,
+                       const std::vector<std::vector<Edge *>> &routes);
+  // Inference methods.
+  Probability Evaluate(const std::vector<std::vector<Edge *>> &target_routes);
 
 private:
   std::vector<MapCluster *> clusters_;
   Graph *graph_;
-  std::unordered_map<MapCluster *, std::set<NodeSize>>
-  ConstructEntryPointsForTerminalPath() const;
-  std::unordered_map<MapCluster *, std::set<std::pair<NodeSize, NodeSize>>>
-  ConstructEntryPointsForNonTerminalPath(
-      const std::unordered_map<Edge *, MapCluster *> &edge_cluster_map) const;
-  // compiler setting
-  std::string graphillion_script_;
-  std::string graphillion_tmp_dir_;
-  int graphillion_thread_num_;
+  LeafConstraintHandler *leaf_constraint_handler_;
+  // PSDD managers
+  std::unordered_map<MapCluster *, SddLiteral> cluster_variable_map_;
+  std::unordered_map<Edge *, SddLiteral> edge_variable_map_;
+  std::unordered_map<MapCluster *, Vtree *> local_vtree_per_cluster_;
+  PsddManager *psdd_manager_;
 };
 } // namespace hierarchical_map
 #endif // HIERARCHICAL_MAP_MAP_NETWORK_H

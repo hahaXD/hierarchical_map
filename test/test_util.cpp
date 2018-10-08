@@ -91,5 +91,76 @@ CreateSimple3LayerNetwork(NodeSize width_per_cluster) {
   auto map_network = std::make_unique<MapNetwork>(std::move(clusters), graph);
   return map_network;
 }
+
+std::unique_ptr<MapNetwork>
+CreateSimple3LayerNetworkLinearLeaf(NodeSize nodes_per_leaf) {
+  // Graph
+  std::vector<Edge *> edges;
+  EdgeSize edge_index = 0;
+  for (NodeSize i = 0; i < 2; ++i) {
+    for (NodeSize j = 0; j < nodes_per_leaf * 2; ++j) {
+      NodeSize first_node = i * nodes_per_leaf * 2 + j;
+      if (j != (nodes_per_leaf * 2 - 1)) {
+        NodeSize second_node = first_node + 1;
+        Edge *new_edge =
+            new Edge(std::to_string(edge_index), first_node, second_node);
+        ++edge_index;
+        edges.push_back(new_edge);
+      }
+      if (i != 1) {
+        NodeSize second_node = (i + 1) * nodes_per_leaf * 2 + j;
+        Edge *new_edge =
+            new Edge(std::to_string(edge_index), first_node, second_node);
+        ++edge_index;
+        edges.push_back(new_edge);
+      }
+    }
+  }
+  Graph *graph = Graph::GraphFromStolenEdgeList(std::move(edges));
+  std::vector<MapCluster *> clusters;
+  std::unordered_set<NodeSize> lu_nodes;
+  std::unordered_set<NodeSize> ll_nodes;
+  std::unordered_set<NodeSize> ru_nodes;
+  std::unordered_set<NodeSize> rl_nodes;
+  for (NodeSize i = 0; i < nodes_per_leaf; ++i) {
+    lu_nodes.insert(i);
+    ll_nodes.insert(i + 2 * nodes_per_leaf);
+    ru_nodes.insert(i + nodes_per_leaf);
+    rl_nodes.insert(i + 3 * nodes_per_leaf);
+  }
+  std::unordered_set<NodeSize> left_nodes(lu_nodes.begin(), lu_nodes.end());
+  left_nodes.insert(ll_nodes.begin(), ll_nodes.end());
+
+  std::unordered_set<NodeSize> right_nodes(ru_nodes.begin(), ru_nodes.end());
+  right_nodes.insert(rl_nodes.begin(), rl_nodes.end());
+
+  std::unordered_set<NodeSize> total_nodes(left_nodes.begin(),
+                                           left_nodes.end());
+  total_nodes.insert(right_nodes.begin(), right_nodes.end());
+  MapCluster *lu_cluster =
+      new MapCluster(0, "lu", std::move(lu_nodes), nullptr, nullptr);
+  clusters.push_back(lu_cluster);
+  MapCluster *ll_cluster =
+      new MapCluster(1, "ll", std::move(ll_nodes), nullptr, nullptr);
+  clusters.push_back(ll_cluster);
+  MapCluster *ru_cluster =
+      new MapCluster(2, "ru", std::move(ru_nodes), nullptr, nullptr);
+  clusters.push_back(ru_cluster);
+  MapCluster *rl_cluster =
+      new MapCluster(3, "rl", std::move(rl_nodes), nullptr, nullptr);
+  clusters.push_back(rl_cluster);
+  MapCluster *left_cluster =
+      new MapCluster(4, "left", std::move(left_nodes), lu_cluster, ll_cluster);
+  clusters.push_back(left_cluster);
+  MapCluster *right_cluster = new MapCluster(5, "right", std::move(right_nodes),
+                                             ru_cluster, rl_cluster);
+  clusters.push_back(right_cluster);
+  MapCluster *total_cluster = new MapCluster(6, "total", std::move(total_nodes),
+                                             left_cluster, right_cluster);
+  clusters.push_back(total_cluster);
+  total_cluster->SetInternalExternalEdgesFromEdgeList(graph->edges());
+  auto map_network = std::make_unique<MapNetwork>(std::move(clusters), graph);
+  return map_network;
+}
 } // namespace testing
 } // namespace hierarchical_map

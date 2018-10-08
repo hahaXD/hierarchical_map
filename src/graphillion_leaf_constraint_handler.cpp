@@ -19,6 +19,7 @@ extern "C" {
 
 namespace {
 using hierarchical_map::Edge;
+using hierarchical_map::MapCluster;
 using nlohmann::json;
 using std::istringstream;
 using std::map;
@@ -243,14 +244,9 @@ namespace hierarchical_map {
 class GraphillionLeafConstraintHandler : public LeafConstraintHandler {
 public:
   GraphillionLeafConstraintHandler(
-      const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-      const std::unordered_map<SddLiteral, Edge *> *variable_to_edge_map,
-      const std::unordered_map<MapCluster *, Vtree *> *local_vtree_per_cluster,
-      const std::unordered_map<MapCluster *, std::set<NodeSize>>
-          *terminal_nodes_per_cluster,
-      const std::unordered_map<MapCluster *,
-                               std::set<std::pair<NodeSize, NodeSize>>>
-          *non_terminal_nodes_per_cluster,
+      const std::unordered_map<Edge *, SddLiteral> &edge_variable_map,
+      const std::unordered_map<SddLiteral, Edge *> &variable_to_edge_map,
+      const std::unordered_map<MapCluster *, Vtree *> &local_vtree_per_cluster,
       const string &graphillion_script, const string &tmp_dir, int thread_num);
   ~GraphillionLeafConstraintHandler() override {
     for (const auto &manager_entry : sdd_manager_) {
@@ -298,16 +294,11 @@ private:
 };
 
 GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
-    const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-    const std::unordered_map<SddLiteral, Edge *> *variable_to_edge_map,
-    const std::unordered_map<MapCluster *, Vtree *> *local_vtree_per_cluster,
-    const std::unordered_map<MapCluster *, std::set<NodeSize>>
-        *terminal_nodes_per_cluster,
-    const std::unordered_map<MapCluster *,
-                             std::set<std::pair<NodeSize, NodeSize>>>
-        *non_terminal_nodes_per_cluster,
+    const std::unordered_map<Edge *, SddLiteral> &edge_variable_map,
+    const std::unordered_map<SddLiteral, Edge *> &variable_to_edge_map,
+    const std::unordered_map<MapCluster *, Vtree *> &local_vtree_per_cluster,
     const string &graphillion_script, const string &tmp_dir, int thread_num) {
-  for (const auto &local_vtree_entry : *local_vtree_per_cluster) {
+  for (const auto &local_vtree_entry : local_vtree_per_cluster) {
     MapCluster *target_cluster = local_vtree_entry.first;
     if (target_cluster->left_child() != nullptr) {
       assert(target_cluster->right_child() != nullptr);
@@ -326,15 +317,13 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
     sdd_manager_auto_gc_and_minimize_off(sdd_manager);
     sdd_manager_[target_cluster] = sdd_manager;
     sdd_vtree_free(sdd_vtree);
-    auto terminal_nodes_it = terminal_nodes_per_cluster->find(target_cluster);
-    auto non_terminal_nodes_it =
-        non_terminal_nodes_per_cluster->find(target_cluster);
-    assert(terminal_nodes_it != terminal_nodes_per_cluster->end() &&
-           non_terminal_nodes_it != non_terminal_nodes_per_cluster->end());
+    auto entry_nodes = target_cluster->EntryPoints();
+    auto entry_nodes_pair_for_non_terminal =
+        target_cluster->EntryPointPairsForNonTerminalPaths();
     map<pair<NodeSize, NodeSize>, vector<Edge *>> node_pair_to_edges;
     for (SddLiteral cur_lit : sequenced_literals) {
-      auto cur_lit_it = variable_to_edge_map->find(cur_lit);
-      assert(cur_lit_it != variable_to_edge_map->end());
+      auto cur_lit_it = variable_to_edge_map.find(cur_lit);
+      assert(cur_lit_it != variable_to_edge_map.end());
       Edge *cur_edge = cur_lit_it->second;
       pair<NodeSize, NodeSize> cur_pair(cur_edge->x_node_index(),
                                         cur_edge->y_node_index());
@@ -345,9 +334,8 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
         node_pair_it->second.push_back(cur_edge);
       }
     }
-    json problem_spec =
-        ConstructProblemSpecJson(node_pair_to_edges, terminal_nodes_it->second,
-                                 non_terminal_nodes_it->second);
+    json problem_spec = ConstructProblemSpecJson(
+        node_pair_to_edges, entry_nodes, entry_nodes_pair_for_non_terminal);
     string problem_spec_filename =
         tmp_dir + "/" + target_cluster->cluster_name() + ".json";
     std::ofstream problem_spec_fp(problem_spec_filename);
@@ -367,8 +355,8 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
       const auto &edges = node_pair_to_edges[node_pair_key];
       vector<SddLiteral> sdd_indexes;
       for (Edge *cur_edge : edges) {
-        auto cur_edge_it = edge_variable_map->find(cur_edge);
-        assert(cur_edge_it != edge_variable_map->end());
+        auto cur_edge_it = edge_variable_map.find(cur_edge);
+        assert(cur_edge_it != edge_variable_map.end());
         SddLiteral cur_edge_psdd_index = cur_edge_it->second;
         auto psdd_index_it = psdd_index_to_sdd_index.find(cur_edge_psdd_index);
         assert(psdd_index_it != psdd_index_to_sdd_index.end());
@@ -389,7 +377,7 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
         NegativeTerm(sdd_literals, sdd_manager);
     // terminal path constraint
     terminal_path_constraint_[target_cluster] = {};
-    for (NodeSize terminal_node : terminal_nodes_it->second) {
+    for (NodeSize terminal_node : entry_nodes) {
       string cur_terminal_zdd_string =
           response["terminal_" + std::to_string(terminal_node)];
       SddNode *cur_terminal_constraint = ZddStringToSdd(
@@ -402,7 +390,8 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
     }
     // non terminal path constraint
     non_terminal_path_constraint_[target_cluster] = {};
-    for (const auto &non_terminal_node_pair : non_terminal_nodes_it->second) {
+    for (const auto &non_terminal_node_pair :
+         entry_nodes_pair_for_non_terminal) {
       if (non_terminal_node_pair.first == non_terminal_node_pair.second) {
         non_terminal_path_constraint_[target_cluster][non_terminal_node_pair] =
             empty_path_constraint_[target_cluster];
@@ -421,19 +410,13 @@ GraphillionLeafConstraintHandler::GraphillionLeafConstraintHandler(
 
 LeafConstraintHandler *
 LeafConstraintHandler::GetGraphillionSddLeafConstraintHandler(
-    const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-    const std::unordered_map<SddLiteral, Edge *> *variable_to_edge_map,
-    const std::unordered_map<MapCluster *, Vtree *> *local_vtree_per_cluster,
-    const std::unordered_map<MapCluster *, std::set<NodeSize>>
-        *terminal_nodes_per_cluster,
-    const std::unordered_map<MapCluster *,
-                             std::set<std::pair<NodeSize, NodeSize>>>
-        *non_terminal_nodes_per_cluster,
+    const std::unordered_map<Edge *, SddLiteral> &edge_variable_map,
+    const std::unordered_map<SddLiteral, Edge *> &variable_to_edge_map,
+    const std::unordered_map<MapCluster *, Vtree *> &local_vtree_per_cluster,
     const std::string &graphillion_script, const std::string &tmp_dir,
     int thread_num) {
   return new GraphillionLeafConstraintHandler(
       edge_variable_map, variable_to_edge_map, local_vtree_per_cluster,
-      terminal_nodes_per_cluster, non_terminal_nodes_per_cluster,
       graphillion_script, tmp_dir, thread_num);
 }
 } // namespace hierarchical_map

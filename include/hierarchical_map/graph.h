@@ -36,9 +36,16 @@ public:
   std::set<NodeSize> Vertices() const;
   NodeSize node_size() const { return node_size_; }
   json to_json() const;
+  // Returns the matched edge with the same src and dst as specified by
+  // input_json. If multiple such edges exist, returns the one sharing the same
+  // name as specified by input_json, otherwise returns an arbitrary matching
+  // edge.
+  Edge *EdgeFromJson(const json &input_json);
 
 private:
   explicit Graph(std::vector<Edge *> edges, bool stolen_edges);
+  std::map<std::pair<NodeSize, NodeSize>, std::vector<Edge *>>
+      node_pair_to_edges_;
   std::vector<Edge *> edges_;
   NodeSize node_size_;
   bool stolen_edges_;

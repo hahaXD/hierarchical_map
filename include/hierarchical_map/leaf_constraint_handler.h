@@ -28,14 +28,9 @@ public:
                                std::set<std::pair<NodeSize, NodeSize>>>
           *non_terminal_nodes_per_cluster);
   static LeafConstraintHandler *GetGraphillionSddLeafConstraintHandler(
-      const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-      const std::unordered_map<SddLiteral, Edge *> *variable_to_edge_map,
-      const std::unordered_map<MapCluster *, Vtree *> *local_vtree_per_cluster,
-      const std::unordered_map<MapCluster *, std::set<NodeSize>>
-          *terminal_nodes_per_cluster,
-      const std::unordered_map<MapCluster *,
-                               std::set<std::pair<NodeSize, NodeSize>>>
-          *non_terminal_nodes_per_cluster,
+      const std::unordered_map<Edge *, SddLiteral> &edge_variable_map,
+      const std::unordered_map<SddLiteral, Edge *> &variable_to_edge_map,
+      const std::unordered_map<MapCluster *, Vtree *> &local_vtree_per_cluster,
       const std::string &graphillion_script, const std::string &tmp_dir,
       int thread_num);
   virtual ~LeafConstraintHandler() = default;

@@ -64,7 +64,9 @@ std::vector<std::string> TopologicalSort(const json &spec) {
 namespace hierarchical_map {
 
 MapNetwork::MapNetwork(std::vector<MapCluster *> clusters, Graph *graph)
-    : clusters_(std::move(clusters)), graph_(graph) {}
+    : clusters_(std::move(clusters)), graph_(graph),
+      leaf_constraint_handler_(nullptr), psdd_manager_(nullptr) {}
+
 MapNetwork *MapNetwork::MapNetworkFromJsonSpecFile(const char *filename) {
   std::ifstream in_fd(filename);
   json network_spec;
@@ -95,25 +97,51 @@ MapCluster *MapNetwork::root_cluster() const { return clusters_.back(); }
 unordered_map<Edge *, MapCluster *> MapNetwork::EdgeClusterMap() const {
   unordered_map<Edge *, MapCluster *> result;
   for (MapCluster *cur_cluster : clusters_) {
-    for (Edge *cur_internal_edge : cur_cluster->internal_edges()) {
+    for (Edge *cur_internal_edge : cur_cluster->lr_cut_edges()) {
       result[cur_internal_edge] = cur_cluster;
     }
   }
   return result;
 }
 
-pair<PsddNode *, PsddManager *> MapNetwork::CompileConstraint() const {
-  size_t cluster_size = clusters_.size();
-  unordered_map<MapCluster *, SddLiteral> cluster_variable_map;
-  unordered_map<Edge *, SddLiteral> edge_variable_map;
+pair<PsddNode *, PsddManager *>
+MapNetwork::CompileConstraint(const std::string &graphillion_script,
+                              const std::string &tmp_dir, int thread_num) {
+  unordered_map<Edge *, MapCluster *> edge_cluster_map = EdgeClusterMap();
+  SetupPsddManager();
+  CompileLeafClustersUsingGraphillion(graphillion_script, tmp_dir, thread_num);
+  // start timer
+  auto compilation_start_time = get_time::now();
+  for (MapCluster *cur_cluster : clusters_) {
+    cur_cluster->InitConstraint(
+        &cluster_variable_map_, &edge_variable_map_, psdd_manager_,
+        local_vtree_per_cluster_[cur_cluster], leaf_constraint_handler_);
+  }
+  auto compilation_end_time = get_time::now();
+  std::cout << "Compilation time : "
+            << std::chrono::duration_cast<ms>(compilation_end_time -
+                                              compilation_start_time)
+                   .count()
+            << " ms " << std::endl;
+  MapCluster *root = clusters_.back();
+  return pair<PsddNode *, PsddManager *>(root->internal_path_constraint(),
+                                         psdd_manager_);
+}
+
+void MapNetwork::SetupPsddManager() {
+  cluster_variable_map_.clear();
+  edge_variable_map_.clear();
+  local_vtree_per_cluster_.clear();
+  if (psdd_manager_ != nullptr)
+    delete (psdd_manager_);
   SddLiteral index = 1;
   MapCluster *root = clusters_.back();
   for (MapCluster *cur_cluster : clusters_) {
     if (cur_cluster != root) {
-      cluster_variable_map[cur_cluster] = index++;
+      cluster_variable_map_[cur_cluster] = index++;
     }
-    for (Edge *cur_internal_edge : cur_cluster->internal_edges()) {
-      edge_variable_map[cur_internal_edge] = index++;
+    for (Edge *cur_internal_edge : cur_cluster->lr_cut_edges()) {
+      edge_variable_map_[cur_internal_edge] = index++;
     }
   }
   // constructing a vtree for psdd manager
@@ -121,10 +149,9 @@ pair<PsddNode *, PsddManager *> MapNetwork::CompileConstraint() const {
   // vtree contains all the variables inside this cluster.
   unordered_map<MapCluster *, Vtree *> sub_vtree_map;
   unordered_map<MapCluster *, Vtree *> vtree_construction_cache;
-  for (size_t i = 0; i < cluster_size; ++i) {
-    MapCluster *cur_cluster = clusters_[i];
+  for (MapCluster *cur_cluster : clusters_) {
     Vtree *tmp_local_vtree = cur_cluster->GenerateLocalVtree(
-        &cluster_variable_map, &edge_variable_map);
+        &cluster_variable_map_, &edge_variable_map_);
     sub_vtree_map[cur_cluster] = tmp_local_vtree;
     if (cur_cluster->left_child() != nullptr) {
       Vtree *decomposable_vtree_node = new_internal_vtree(
@@ -139,10 +166,9 @@ pair<PsddNode *, PsddManager *> MapNetwork::CompileConstraint() const {
   }
   Vtree *global_vtree = vtree_construction_cache[root];
   set_vtree_properties(global_vtree);
-  PsddManager *psdd_manager =
-      PsddManager::GetPsddManagerFromVtree(global_vtree);
+  psdd_manager_ = PsddManager::GetPsddManagerFromVtree(global_vtree);
   // Manager vtree is a copy of global_vtree
-  Vtree *manager_vtree = psdd_manager->vtree();
+  Vtree *manager_vtree = psdd_manager_->vtree();
   vector<Vtree *> serialized_global_vtree =
       vtree_util::SerializeVtree(global_vtree);
   vector<Vtree *> serialized_manager_vtree =
@@ -154,103 +180,65 @@ pair<PsddNode *, PsddManager *> MapNetwork::CompileConstraint() const {
     sdd_vtree_set_data((void *)serialized_manager_vtree[i],
                        cur_global_vtree_node);
   }
-  unordered_map<MapCluster *, Vtree *> local_vtree_per_cluster;
   for (const auto &sub_vtree_pair : sub_vtree_map) {
     MapCluster *cur_cluster = sub_vtree_pair.first;
     Vtree *tmp_local_vtree = sub_vtree_pair.second;
-    local_vtree_per_cluster[cur_cluster] =
+    local_vtree_per_cluster_[cur_cluster] =
         (Vtree *)sdd_vtree_data(tmp_local_vtree);
   }
   // free the global vtree, and all the vtree reference is from manager_vtree
   sdd_vtree_free(global_vtree);
-  unordered_map<Edge *, MapCluster *> edge_cluster_map = EdgeClusterMap();
+}
+
+void MapNetwork::CompileLeafClustersUsingGraphillion(
+    const std::string &graphillion_script, const std::string &tmp_dir,
+    int thread_num) {
   unordered_map<SddLiteral, Edge *> variable_to_edge_map;
-  for (const auto &entry : edge_variable_map) {
+  for (const auto &entry : edge_variable_map_) {
     variable_to_edge_map[entry.second] = entry.first;
   }
-  unordered_map<MapCluster *, set<NodeSize>> terminal_entering_points =
-      ConstructEntryPointsForTerminalPath();
-  unordered_map<MapCluster *, set<pair<NodeSize, NodeSize>>>
-      non_terminal_entering_points =
-          ConstructEntryPointsForNonTerminalPath(edge_cluster_map);
-  LeafConstraintHandler *leaf_constraint_handler =
+  if (leaf_constraint_handler_ != nullptr) {
+    delete (leaf_constraint_handler_);
+  }
+  leaf_constraint_handler_ =
       LeafConstraintHandler::GetGraphillionSddLeafConstraintHandler(
-          &edge_variable_map, &variable_to_edge_map, &local_vtree_per_cluster,
-          &terminal_entering_points, &non_terminal_entering_points,
-          graphillion_script_, graphillion_tmp_dir_, graphillion_thread_num_);
-  // start timer
-  auto compilation_start_time = get_time::now();
-  for (MapCluster *cur_cluster : clusters_) {
-    cur_cluster->InitConstraint(&cluster_variable_map, &edge_variable_map,
-                                &edge_cluster_map, psdd_manager,
-                                local_vtree_per_cluster[cur_cluster],
-                                leaf_constraint_handler);
-  }
-  auto compilation_end_time = get_time::now();
-  std::cout << "Compilation time : "
-            << std::chrono::duration_cast<ms>(compilation_end_time -
-                                              compilation_start_time)
-                   .count()
-            << " ms " << std::endl;
-  return pair<PsddNode *, PsddManager *>(root->internal_path_constraint(),
-                                         psdd_manager);
+          edge_variable_map_, variable_to_edge_map, local_vtree_per_cluster_,
+          graphillion_script, tmp_dir, thread_num);
 }
-
-void MapNetwork::SetGraphillionCompiler(std::string graphillion_script,
-                                        std::string tmp_dir, int thread_num) {
-  graphillion_script_ = std::move(graphillion_script);
-  graphillion_tmp_dir_ = std::move(tmp_dir);
-  graphillion_thread_num_ = thread_num;
-}
-
-unordered_map<MapCluster *, set<NodeSize>>
-MapNetwork::ConstructEntryPointsForTerminalPath() const {
-  unordered_map<MapCluster *, set<NodeSize>> result;
+void MapNetwork::LearnWithRoutes(
+    const std::string &graphillion_script, const std::string &tmp_dir,
+    int thread_num, const std::vector<std::vector<Edge *>> &routes) {
+  SetupPsddManager();
+  CompileLeafClustersUsingGraphillion(graphillion_script, tmp_dir, thread_num);
+  PsddParameter laplacian_alpha = PsddParameter::CreateFromDecimal(1.0);
   for (MapCluster *cur_cluster : clusters_) {
-    set<NodeSize> cur_entering_points;
-    for (const auto &external_entry : cur_cluster->external_edges()) {
-      if (cur_entering_points.find(external_entry.second) ==
-          cur_entering_points.end()) {
-        cur_entering_points.insert(external_entry.second);
-      }
+    if (cur_cluster->left_child() == nullptr) {
+      // Only compile constraint in the leaf regions.
+      cur_cluster->InitConstraint(
+          &cluster_variable_map_, &edge_variable_map_, psdd_manager_,
+          local_vtree_per_cluster_[cur_cluster], leaf_constraint_handler_);
+      cur_cluster->LearnParameters(routes, psdd_manager_, laplacian_alpha);
+    } else {
+      cur_cluster->LearnParameters(routes, psdd_manager_, laplacian_alpha);
     }
-    result[cur_cluster] = cur_entering_points;
   }
-  return result;
 }
 
-unordered_map<MapCluster *, set<pair<NodeSize, NodeSize>>>
-MapNetwork::ConstructEntryPointsForNonTerminalPath(
-    const std::unordered_map<Edge *, MapCluster *> &edge_cluster_map) const {
-  unordered_map<MapCluster *, set<pair<NodeSize, NodeSize>>> result;
+Probability
+MapNetwork::Evaluate(const std::vector<std::vector<Edge *>> &target_routes) {
+  Probability score = Probability::CreateFromDecimal(1.0);
   for (MapCluster *cur_cluster : clusters_) {
-    set<pair<NodeSize, NodeSize>> cur_entering_points;
-    const auto &cur_external_edges = cur_cluster->external_edges();
-    for (auto i_it = cur_external_edges.begin();
-         i_it != cur_external_edges.end(); ++i_it) {
-      auto j_it = i_it;
-      std::advance(j_it, 1);
-      NodeSize first_entering_node = i_it->second;
-      Edge *first_external_edge = i_it->first;
-      auto first_edge_cluster_it = edge_cluster_map.find(first_external_edge);
-      for (; j_it != cur_external_edges.end(); ++j_it) {
-        NodeSize second_entering_node = j_it->second;
-        Edge *second_external_edge = j_it->first;
-        auto second_edge_cluster_it =
-            edge_cluster_map.find(second_external_edge);
-        if (first_edge_cluster_it->second == second_edge_cluster_it->second) {
-          continue;
-        }
-        pair<NodeSize, NodeSize> node_pair(
-            min(first_entering_node, second_entering_node),
-            max(first_entering_node, second_entering_node));
-        if (cur_entering_points.find(node_pair) == cur_entering_points.end()) {
-          cur_entering_points.insert(node_pair);
-        }
-      }
-    }
-    result[cur_cluster] = cur_entering_points;
+    score *= cur_cluster->Evaluate(target_routes);
   }
-  return result;
+  return score;
+}
+
+std::unordered_map<std::string, MapCluster *>
+MapNetwork::GetMapClustersByName() const {
+  std::unordered_map<std::string, MapCluster *> map_clusters_by_name;
+  for (MapCluster *cur_cluster : clusters_) {
+    map_clusters_by_name[cur_cluster->cluster_name()] = cur_cluster;
+  }
+  return map_clusters_by_name;
 }
 } // namespace hierarchical_map

@@ -5,7 +5,6 @@
 #ifndef HIERARCHICAL_MAP_MAP_CLUSTER_H
 #define HIERARCHICAL_MAP_MAP_CLUSTER_H
 
-#include <gtest/gtest_prod.h>
 #include <hierarchical_map/graph.h>
 #include <hierarchical_map/types.h>
 #include <memory>
@@ -17,11 +16,11 @@
 namespace hierarchical_map {
 class LeafConstraintHandler;
 
-// Learning states, and we used this state to estimate
-// parameters. Different subset of fields are used for different contexts.
-// For internal cluster:
+// Learning states given a particular way of the entering the region, and we
+// used this state to estimate parameters. Different subset of fields are used
+// for different contexts. For internal cluster:
 //   If two external edges are used, a.k.a. non_terminal_path,
-//     lr_cut_edges_freq_ is used.
+//     both lr_cut_edges_freq_ and zero_lr_cut_edge_freq are used.
 //   If only one external edge is used, a.k.a. terminal_path,
 //     both lr_cut_edges_freq_ and zero_lr_cut_edge_freq_ is used.
 //   If no external edge is used,
@@ -31,12 +30,27 @@ class LeafConstraintHandler;
 //   All cases:
 //     routes_in_leaf_cluster_
 
+struct ParameterLearningStatePerCase {
+  std::unordered_map<Edge *, double> lr_cut_edges_freq;
+  double zero_lr_cut_edge_freq = 0;
+  double left_internal_freq = 0;
+  double right_internal_freq = 0;
+  std::vector<std::vector<Edge *>> routes_in_leaf_cluster;
+};
+
 struct ParameterLearningState {
-  std::unordered_map<Edge *, double> lr_cut_edges_freq_;
-  double zero_lr_cut_edge_freq_ = 0;
-  double left_internal_freq_ = 0;
-  double right_internal_freq_ = 0;
-  std::vector<std::vector<Edge *>> routes_in_leaf_cluster_;
+  std::map<std::pair<Edge *, Edge *>, ParameterLearningStatePerCase>
+      param_learning_state_non_terminal;
+  std::unordered_map<Edge *, ParameterLearningStatePerCase>
+      param_learning_state_terminal;
+  ParameterLearningStatePerCase param_learning_state_internal;
+};
+
+struct InternalClusterParameterPerCase {
+  std::unordered_map<Edge *, PsddParameter> lr_cut_edges_freq;
+  PsddParameter zero_lr_cut_edge_freq = PsddParameter::CreateFromDecimal(0);
+  PsddParameter left_internal_freq = PsddParameter::CreateFromDecimal(0);
+  PsddParameter right_internal_freq = PsddParameter::CreateFromDecimal(0);
 };
 
 struct SlicedRouteComponent {
@@ -53,6 +67,9 @@ public:
   MapCluster(ClusterSize cluster_index, std::string cluster_name,
              std::unordered_set<NodeSize> nodes, MapCluster *left_child,
              MapCluster *right_child);
+  // Recursively sets the internal and external edges given the set of edges.
+  // Call root.SetInternalExternalEdgesFromEdgeList(...) will set the internal
+  // and external edges for every clusters in the network.
   void SetInternalExternalEdgesFromEdgeList(const std::vector<Edge *> &edges);
   static MapCluster *
   MapClusterFromNetworkJson(const json &json_spec, ClusterSize cluster_index,
@@ -65,14 +82,25 @@ public:
   const std::unordered_map<Edge *, NodeSize> &external_edges() const {
     return external_edges_;
   }
-  const std::unordered_set<Edge *> &internal_edges() const {
-    return internal_edges_;
+  const std::unordered_set<Edge *> &lr_cut_edges() const {
+    return lr_cut_edges_;
   }
+
+  // Returns the set of internal nodes that external edges of the current
+  // cluster connects.
+  std::set<NodeSize> EntryPoints() const;
+
+  // Returns the set of entry node pairs that can form non terminal paths. If a
+  // pair of external edges of this cluster does not belong to the lr-cut-edges
+  // of some cluster in the network, their corresponding entry points form a
+  // pair in the result.
+  std::set<std::pair<NodeSize, NodeSize>>
+  EntryPointPairsForNonTerminalPaths() const;
+
   const std::string &cluster_name() { return cluster_name_; }
   void InitConstraint(
       const std::unordered_map<MapCluster *, SddLiteral> *cluster_variable_map,
       const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-      const std::unordered_map<Edge *, MapCluster *> *edge_cluster_map,
       PsddManager *manager, Vtree *local_vtree,
       LeafConstraintHandler *leaf_constraint_handler);
   Vtree *GenerateLocalVtree(
@@ -87,9 +115,16 @@ public:
   PsddNode *non_terminal_path_constraint(Edge *entering_edge_1,
                                          Edge *entering_edge_2) const;
   // Learning methods
-  void UpdateParameterLearningStateSimple(
-      const std::vector<std::vector<Edge *>> &routes);
-  void NormalizeLearningState();
+  // Learn parameters inside this cluster. If this cluster is a leaf cluster,
+  // its conditional constraints must be compiled before calling this method.
+  void LearnParameters(const std::vector<std::vector<Edge *>> &routes,
+                       PsddManager *manager, PsddParameter alpha);
+  // Update the learning states for this cluster, and the learning states will
+  // be used for parameter estimation.
+  ParameterLearningState UpdateParameterLearningStateSimple(
+      const std::vector<std::vector<Edge *>> &routes) const;
+
+  Probability Evaluate(const std::vector<std::vector<Edge *>> &routes);
 
   // Slice routes. In each route slice, the internal edges and external edges
   // are ordered.
@@ -102,6 +137,36 @@ public:
   // external_edge[1].
   std::vector<SlicedRouteComponent>
   SliceRoute(const std::vector<Edge *> &edges) const;
+
+  const InternalClusterParameterPerCase &
+  internal_cluster_internal_parameter() const {
+    return internal_parameter_;
+  }
+  const std::map<std::pair<Edge *, Edge *>, InternalClusterParameterPerCase> &
+  internal_cluster_non_terminal_parameter() const {
+    return non_terminal_parameter_;
+  }
+  const std::map<Edge *, InternalClusterParameterPerCase> &
+  internal_cluster_terminal_parameter() const {
+    return terminal_parameter_;
+  }
+  PsddNode *leaf_cluster_internal_path_distribution() const {
+    return leaf_internal_path_distribution_;
+  }
+
+  const std::map<Edge *, PsddNode *> &
+  leaf_cluster_terminal_path_distribution() const {
+    return leaf_terminal_path_distribution_;
+  }
+
+  const std::map<std::pair<Edge *, Edge *>, PsddNode *> &
+  leaf_cluster_non_terminal_path_distribution() const {
+    return leaf_non_terminal_path_distribution_;
+  }
+
+  const std::unordered_map<Edge *, SddLiteral> *edge_variable_map() const {
+    return edge_variable_map_;
+  }
 
 protected:
   PsddNode *ConstructEmptyPathConstraintForInternalCluster() const;
@@ -116,11 +181,10 @@ protected:
   MapCluster *left_child_;
   MapCluster *right_child_;
   std::unordered_map<Edge *, NodeSize> external_edges_;
-  std::unordered_set<Edge *> internal_edges_;
+  std::unordered_set<Edge *> lr_cut_edges_;
   // compilation members
   const std::unordered_map<MapCluster *, SddLiteral> *cluster_variable_map_;
   const std::unordered_map<Edge *, SddLiteral> *edge_variable_map_;
-  const std::unordered_map<Edge *, MapCluster *> *edge_cluster_map_;
   Vtree *local_vtree_;
   PsddManager *pm_;
   // compilation results for internal clusters
@@ -129,17 +193,16 @@ protected:
   std::map<Edge *, PsddNode *> terminal_path_constraint_;
   std::map<std::pair<Edge *, Edge *>, PsddNode *> non_terminal_path_constraint_;
 
-  // Learning states.
-  std::map<std::pair<Edge *, Edge *>, ParameterLearningState>
-      param_learning_state_non_terminal_;
-  std::unordered_map<Edge *, ParameterLearningState>
-      param_learning_state_terminal_;
-  ParameterLearningState param_learning_state_internal_;
-
-  // Friend tests
-  FRIEND_TEST(MAP_CLUSTER_SPLIT_ROUTE_TEST, LEARNING_STATE_TEST);
-  FRIEND_TEST(MAP_CLUSTER_SPLIT_ROUTE_TEST,
-              LEARNING_STATE_TEST_WITH_ILLEGAL_ROUTE);
+  // parameters for internal clusters.
+  InternalClusterParameterPerCase internal_parameter_;
+  std::map<std::pair<Edge *, Edge *>, InternalClusterParameterPerCase>
+      non_terminal_parameter_;
+  std::map<Edge *, InternalClusterParameterPerCase> terminal_parameter_;
+  // parameters for leaf clusters.
+  PsddNode *leaf_internal_path_distribution_;
+  std::map<Edge *, PsddNode *> leaf_terminal_path_distribution_;
+  std::map<std::pair<Edge *, Edge *>, PsddNode *>
+      leaf_non_terminal_path_distribution_;
 };
 
 } // namespace hierarchical_map

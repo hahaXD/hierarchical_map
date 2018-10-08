@@ -7,6 +7,9 @@
 #include <hierarchical_map/leaf_constraint_handler.h>
 #include <hierarchical_map/map_cluster.h>
 #include <htd/main.hpp>
+#include <psdd/psdd_manager.h>
+#include <psdd/psdd_node.h>
+#include <tuple>
 #include <unordered_map>
 extern "C" {
 #include <sdd/sddapi.h>
@@ -22,6 +25,27 @@ using std::unique_ptr;
 using std::unordered_map;
 using std::unordered_set;
 using std::vector;
+
+std::unordered_map<int32_t, BatchedPsddValue> GetDataMapFromRoute(
+    const std::vector<std::vector<Edge *>> &routes,
+    const std::unordered_set<Edge *> &internal_edges,
+    const std::unordered_map<Edge *, SddLiteral> &edge_variable_map) {
+  std::unordered_map<int32_t, BatchedPsddValue> training_data_map;
+  for (const auto &single_route : routes) {
+    std::unordered_set<Edge *> used_edges(single_route.begin(),
+                                          single_route.end());
+    for (Edge *cur_internal_edge : internal_edges) {
+      if (used_edges.find(cur_internal_edge) == used_edges.end()) {
+        training_data_map[edge_variable_map.find(cur_internal_edge)->second]
+            .push_back(false);
+      } else {
+        training_data_map[edge_variable_map.find(cur_internal_edge)->second]
+            .push_back(true);
+      }
+    }
+  }
+  return training_data_map;
+}
 
 std::pair<Edge *, Edge *> make_edge_pair(Edge *edge_a, Edge *edge_b) {
   return std::make_pair(std::min(edge_a, edge_b), std::max(edge_a, edge_b));
@@ -190,7 +214,7 @@ void MapCluster::SetInternalExternalEdgesFromEdgeList(
     right_child_->SetInternalExternalEdgesFromEdgeList(
         right_child_edge_candidates);
   }
-  internal_edges_ = std::move(internal_edges);
+  lr_cut_edges_ = std::move(internal_edges);
   external_edges_ = std::move(external_edges);
 }
 
@@ -199,15 +223,15 @@ MapCluster::MapCluster(ClusterSize cluster_index, std::string cluster_name,
                        MapCluster *left_child, MapCluster *right_child)
     : cluster_index_(cluster_index), cluster_name_(std::move(cluster_name)),
       nodes_(std::move(nodes)), left_child_(left_child),
-      right_child_(right_child), external_edges_(), internal_edges_() {}
+      right_child_(right_child), external_edges_(), lr_cut_edges_(),
+      leaf_internal_path_distribution_(nullptr) {}
 const std::unordered_set<NodeSize> &MapCluster::nodes() const { return nodes_; }
 
 Vtree *MapCluster::GenerateLocalVtree(
     const std::unordered_map<MapCluster *, SddLiteral> *cluster_variable_map,
     const std::unordered_map<Edge *, SddLiteral> *edge_variable_map) const {
   if (left_child_ == nullptr) {
-    vector<Edge *> internal_edges(internal_edges_.begin(),
-                                  internal_edges_.end());
+    vector<Edge *> internal_edges(lr_cut_edges_.begin(), lr_cut_edges_.end());
     auto leaf_region_graph =
         Graph::GraphFromEdgeList(std::move(internal_edges));
     auto edge_order = leaf_region_graph->GreedyEdgeOrder();
@@ -217,7 +241,7 @@ Vtree *MapCluster::GenerateLocalVtree(
           edge_variable_map->find(cur_edge)->second);
     }
     return GenerateRLVtree(ordered_variable_indexes, 0);
-    // return GenerateVtreeUsingMinFillOfPrimalGraph(internal_edges_,
+    // return GenerateVtreeUsingMinFillOfPrimalGraph(lr_cut_edges_,
     //                                              edge_variable_map);
   } else {
     std::vector<SddLiteral> sdd_literals_cur_cluster;
@@ -227,7 +251,7 @@ Vtree *MapCluster::GenerateLocalVtree(
     assert(right_cluster_it != cluster_variable_map->end());
     sdd_literals_cur_cluster.push_back(left_cluster_it->second);
     sdd_literals_cur_cluster.push_back(right_cluster_it->second);
-    for (Edge *cur_internal_edge : internal_edges_) {
+    for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto internal_edge_it = edge_variable_map->find(cur_internal_edge);
       assert(internal_edge_it != edge_variable_map->end());
       sdd_literals_cur_cluster.push_back(internal_edge_it->second);
@@ -347,12 +371,10 @@ Vtree *MapCluster::GenerateVtreeUsingMinFillOfPrimalGraph(
 void MapCluster::InitConstraint(
     const std::unordered_map<MapCluster *, SddLiteral> *cluster_variable_map,
     const std::unordered_map<Edge *, SddLiteral> *edge_variable_map,
-    const std::unordered_map<Edge *, MapCluster *> *edge_cluster_map,
     PsddManager *manager, Vtree *local_vtree,
     LeafConstraintHandler *leaf_constraint_handler) {
   cluster_variable_map_ = cluster_variable_map;
   edge_variable_map_ = edge_variable_map;
-  edge_cluster_map_ = edge_cluster_map;
   pm_ = manager;
   local_vtree_ = local_vtree;
   if (left_child_ == nullptr) {
@@ -384,15 +406,9 @@ void MapCluster::InitConstraint(
       std::advance(j_it, 1);
       NodeSize first_entering_node = i_it->second;
       Edge *first_external_edge = i_it->first;
-      auto first_edge_cluster_it = edge_cluster_map_->find(first_external_edge);
       for (; j_it != external_edges_.end(); ++j_it) {
         NodeSize second_entering_node = j_it->second;
         Edge *second_external_edge = j_it->first;
-        auto second_edge_cluster_it =
-            edge_cluster_map_->find(second_external_edge);
-        if (first_edge_cluster_it->second == second_edge_cluster_it->second) {
-          continue;
-        }
         pair<NodeSize, NodeSize> node_cache(
             min(first_entering_node, second_entering_node),
             max(first_entering_node, second_entering_node));
@@ -422,14 +438,8 @@ void MapCluster::InitConstraint(
       auto j_it = i_it;
       std::advance(j_it, 1);
       Edge *first_external_edge = i_it->first;
-      auto first_edge_cluster_it = edge_cluster_map_->find(first_external_edge);
       for (; j_it != external_edges_.end(); ++j_it) {
         Edge *second_external_edge = j_it->first;
-        auto second_edge_cluster_it =
-            edge_cluster_map_->find(second_external_edge);
-        if (first_edge_cluster_it->second == second_edge_cluster_it->second) {
-          continue;
-        }
         PsddNode *cur_non_terminal_node =
             ConstructNonTerminalPathConstraintForInternalCluster(
                 first_external_edge, second_external_edge);
@@ -508,7 +518,7 @@ MapCluster::ConstructInternalPathConstraintForInternalCluster() const {
   subs.push_back(right_only_sub);
   params.push_back(PsddParameter::CreateFromDecimal(1));
   // including exactly one of the internal edge
-  for (Edge *cur_internal_edge : internal_edges_) {
+  for (Edge *cur_internal_edge : lr_cut_edges_) {
     auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
     assert(cur_internal_edge_it != edge_variable_map_->end());
     PsddNode *cur_prime =
@@ -549,7 +559,7 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
     subs.push_back(first_sub);
     params.push_back(PsddParameter::CreateFromDecimal(1));
     // case two exactly one of the internal edges used
-    for (Edge *cur_internal_edge : internal_edges_) {
+    for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
       assert(cur_internal_edge_it != edge_variable_map_->end());
       PsddNode *cur_prime =
@@ -580,7 +590,7 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
     subs.push_back(first_sub);
     params.push_back(PsddParameter::CreateFromDecimal(1));
     // case two exactly one of the internal edges used
-    for (Edge *cur_internal_edge : internal_edges_) {
+    for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
       assert(cur_internal_edge_it != edge_variable_map_->end());
       PsddNode *cur_prime =
@@ -623,7 +633,7 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
     subs.push_back(sub);
     params.push_back(PsddParameter::CreateFromDecimal(1));
   } else if (edge_1_it->second == 0 && edge_2_it->second == 1) {
-    for (Edge *cur_internal_edge : internal_edges_) {
+    for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
       assert(cur_internal_edge_it != edge_variable_map_->end());
       PsddNode *cur_prime =
@@ -640,7 +650,7 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
       params.push_back(PsddParameter::CreateFromDecimal(1));
     }
   } else if (edge_1_it->second == 1 && edge_2_it->second == 0) {
-    for (Edge *cur_internal_edge : internal_edges_) {
+    for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
       assert(cur_internal_edge_it != edge_variable_map_->end());
       PsddNode *cur_prime =
@@ -783,8 +793,9 @@ MapCluster::SliceRoute(const vector<Edge *> &edges) const {
 }
 
 // Learning methods
-void MapCluster::UpdateParameterLearningStateSimple(
-    const std::vector<std::vector<Edge *>> &routes) {
+ParameterLearningState MapCluster::UpdateParameterLearningStateSimple(
+    const std::vector<std::vector<Edge *>> &routes) const {
+  ParameterLearningState learning_state;
   if (left_child_ == nullptr) {
     // Leaf region
     for (const auto &cur_route : routes) {
@@ -793,15 +804,15 @@ void MapCluster::UpdateParameterLearningStateSimple(
       for (const auto &cur_slice : sliced_components) {
         if (cur_slice.external_edges.size() == 0) {
           // Adds the route into the internal feature state
-          param_learning_state_internal_.routes_in_leaf_cluster_.push_back(
-              std::move(cur_slice.internal_edges));
+          learning_state.param_learning_state_internal.routes_in_leaf_cluster
+              .push_back(std::move(cur_slice.internal_edges));
           continue;
         }
         if (cur_slice.external_edges.size() == 1) {
           // Adds the route into the terminal feature state
           Edge *external_edge = cur_slice.external_edges[0];
-          param_learning_state_terminal_[external_edge]
-              .routes_in_leaf_cluster_.push_back(
+          learning_state.param_learning_state_terminal[external_edge]
+              .routes_in_leaf_cluster.push_back(
                   std::move(cur_slice.internal_edges));
           continue;
         }
@@ -810,8 +821,8 @@ void MapCluster::UpdateParameterLearningStateSimple(
         Edge *external_edge_a = cur_slice.external_edges[0];
         Edge *external_edge_b = cur_slice.external_edges[1];
         auto pair_key = make_edge_pair(external_edge_a, external_edge_b);
-        param_learning_state_non_terminal_[pair_key]
-            .routes_in_leaf_cluster_.push_back(
+        learning_state.param_learning_state_non_terminal[pair_key]
+            .routes_in_leaf_cluster.push_back(
                 std::move(cur_slice.internal_edges));
       }
     }
@@ -824,7 +835,7 @@ void MapCluster::UpdateParameterLearningStateSimple(
         if (cur_slice.external_edges.size() == 0) {
           std::vector<Edge *> used_lr_cut_edges;
           for (Edge *cur_edge : cur_slice.internal_edges) {
-            if (internal_edges_.find(cur_edge) != internal_edges_.end()) {
+            if (lr_cut_edges_.find(cur_edge) != lr_cut_edges_.end()) {
               used_lr_cut_edges.push_back(cur_edge);
             }
           }
@@ -833,82 +844,414 @@ void MapCluster::UpdateParameterLearningStateSimple(
               if (left_child_->nodes().find(
                       cur_slice.internal_edges[0]->x_node_index()) !=
                   left_child_->nodes().end()) {
-                param_learning_state_internal_.left_internal_freq_ += 1;
+                learning_state.param_learning_state_internal
+                    .left_internal_freq += 1;
               } else {
-                param_learning_state_internal_.right_internal_freq_ += 1;
+                learning_state.param_learning_state_internal
+                    .right_internal_freq += 1;
               }
             }
           } else {
             for (Edge *cur_edge : used_lr_cut_edges) {
-              param_learning_state_internal_.lr_cut_edges_freq_[cur_edge] += 1;
+              learning_state.param_learning_state_internal
+                  .lr_cut_edges_freq[cur_edge] += 1;
             }
           }
         } else if (cur_slice.external_edges.size() == 1) {
           Edge *cur_external_edge = cur_slice.external_edges[0];
-          int internal_edges_size = cur_slice.internal_edges.size();
+          int lr_cut_edges_size = cur_slice.internal_edges.size();
           int i = 0;
-          while (i < internal_edges_size) {
+          while (i < lr_cut_edges_size) {
             Edge *cur_internal_edge = cur_slice.internal_edges[i];
-            if (internal_edges_.find(cur_internal_edge) !=
-                internal_edges_.end()) {
-              param_learning_state_terminal_[cur_external_edge]
-                  .lr_cut_edges_freq_[cur_internal_edge]++;
+            if (lr_cut_edges_.find(cur_internal_edge) != lr_cut_edges_.end()) {
+              learning_state.param_learning_state_terminal[cur_external_edge]
+                  .lr_cut_edges_freq[cur_internal_edge]++;
               break;
             }
             ++i;
           }
-          if (i == internal_edges_size) {
+          if (i == lr_cut_edges_size) {
             // The external edge is not connected with any lr-cut-edge of this
             // cluster
-            param_learning_state_terminal_[cur_external_edge]
-                .zero_lr_cut_edge_freq_++;
+            learning_state.param_learning_state_terminal[cur_external_edge]
+                .zero_lr_cut_edge_freq++;
           }
           // Creates internal route features for the remaining lr-cut-edges in
           // the slice
-          for (; i < internal_edges_size; ++i) {
+          for (; i < lr_cut_edges_size; ++i) {
             Edge *cur_internal_edge = cur_slice.internal_edges[i];
-            if (internal_edges_.find(cur_internal_edge) !=
-                internal_edges_.end()) {
-              param_learning_state_internal_
-                  .lr_cut_edges_freq_[cur_internal_edge]++;
+            if (lr_cut_edges_.find(cur_internal_edge) != lr_cut_edges_.end()) {
+              learning_state.param_learning_state_internal
+                  .lr_cut_edges_freq[cur_internal_edge]++;
             }
           }
         } else {
           assert(cur_slice.external_edges.size() == 2);
           std::vector<Edge *> lr_cut_edges;
           for (Edge *cur_edge : cur_slice.internal_edges) {
-            if (internal_edges_.find(cur_edge) != internal_edges_.end()) {
+            if (lr_cut_edges_.find(cur_edge) != lr_cut_edges_.end()) {
               lr_cut_edges.push_back(cur_edge);
             }
           }
           if (lr_cut_edges.size() == 0) {
             auto external_edge_pair = make_edge_pair(
                 cur_slice.external_edges[0], cur_slice.external_edges[1]);
-            param_learning_state_non_terminal_[external_edge_pair]
-                .zero_lr_cut_edge_freq_++;
+            learning_state.param_learning_state_non_terminal[external_edge_pair]
+                .zero_lr_cut_edge_freq++;
           } else if (lr_cut_edges.size() == 1) {
             auto external_edge_pair = make_edge_pair(
                 cur_slice.external_edges[0], cur_slice.external_edges[1]);
-            param_learning_state_non_terminal_[external_edge_pair]
-                .lr_cut_edges_freq_[lr_cut_edges[0]]++;
+            learning_state.param_learning_state_non_terminal[external_edge_pair]
+                .lr_cut_edges_freq[lr_cut_edges[0]]++;
           } else {
             // We create:
             // a terminal case (external_edge[0], internal_edge[0])
             // a terminal case (external_edge[1], internal_edge[k])
             // internal cases where each is internal_edge[i] having 0 < i < k.
-            param_learning_state_terminal_[cur_slice.external_edges[0]]
-                .lr_cut_edges_freq_[lr_cut_edges[0]]++;
-            param_learning_state_terminal_[cur_slice.external_edges[1]]
-                .lr_cut_edges_freq_[lr_cut_edges.back()]++;
+            learning_state
+                .param_learning_state_terminal[cur_slice.external_edges[0]]
+                .lr_cut_edges_freq[lr_cut_edges[0]]++;
+            learning_state
+                .param_learning_state_terminal[cur_slice.external_edges[1]]
+                .lr_cut_edges_freq[lr_cut_edges.back()]++;
             int lr_cut_edge_size = lr_cut_edges.size();
             for (int i = 1; i < lr_cut_edge_size - 1; ++i) {
-              param_learning_state_internal_
-                  .lr_cut_edges_freq_[lr_cut_edges[i]]++;
+              learning_state.param_learning_state_internal
+                  .lr_cut_edges_freq[lr_cut_edges[i]]++;
             }
           }
         }
       }
     }
+  }
+  return learning_state;
+}
+
+void MapCluster::LearnParameters(const std::vector<std::vector<Edge *>> &routes,
+                                 PsddManager *manager, PsddParameter alpha) {
+  auto learning_state = UpdateParameterLearningStateSimple(routes);
+  if (left_child_ != nullptr) {
+    // Learn parameters in internal cluster
+    // Internal route parameter
+    PsddParameter internal_total = PsddParameter::CreateFromDecimal(0);
+    internal_parameter_.left_internal_freq =
+        PsddParameter::CreateFromDecimal(
+            learning_state.param_learning_state_internal.left_internal_freq) +
+        alpha;
+    internal_total += internal_parameter_.left_internal_freq;
+    internal_parameter_.right_internal_freq =
+        alpha +
+        PsddParameter::CreateFromDecimal(
+            learning_state.param_learning_state_internal.right_internal_freq);
+    internal_total += internal_parameter_.right_internal_freq;
+    for (Edge *cur_lr_cut_edge : lr_cut_edges_) {
+      const PsddParameter cur_param =
+          alpha + PsddParameter::CreateFromDecimal(
+                      learning_state.param_learning_state_internal
+                          .lr_cut_edges_freq[cur_lr_cut_edge]);
+      internal_parameter_.lr_cut_edges_freq[cur_lr_cut_edge] = cur_param;
+      internal_total += cur_param;
+    }
+    internal_parameter_.left_internal_freq /= internal_total;
+    internal_parameter_.right_internal_freq /= internal_total;
+    for (Edge *cur_lr_cut_edge : lr_cut_edges_) {
+      internal_parameter_.lr_cut_edges_freq[cur_lr_cut_edge] /= internal_total;
+    }
+    // Terminal route parameter
+    for (auto external_edge_pair : external_edges_) {
+      Edge *cur_external_edge = external_edge_pair.first;
+      std::unordered_map<Edge *, InternalClusterParameterPerCase>::iterator
+          cur_param_it;
+      InternalClusterParameterPerCase cur_terminal_parameter;
+      auto cur_case_it =
+          learning_state.param_learning_state_terminal.find(cur_external_edge);
+      if (cur_case_it == learning_state.param_learning_state_terminal.end()) {
+        auto case_size = lr_cut_edges_.size() + 1;
+        PsddParameter uniform_parameter =
+            PsddParameter::CreateFromDecimal(1.0 / case_size);
+        cur_terminal_parameter.zero_lr_cut_edge_freq = uniform_parameter;
+        for (Edge *cur_edge : lr_cut_edges_) {
+          cur_terminal_parameter.lr_cut_edges_freq[cur_edge] =
+              uniform_parameter;
+        }
+      } else {
+        PsddParameter cur_terminal_total = PsddParameter::CreateFromDecimal(0);
+        cur_terminal_parameter.zero_lr_cut_edge_freq =
+            PsddParameter::CreateFromDecimal(
+                cur_case_it->second.zero_lr_cut_edge_freq) +
+            alpha;
+        cur_terminal_total += cur_terminal_parameter.zero_lr_cut_edge_freq;
+        for (Edge *cur_edge : lr_cut_edges_) {
+          PsddParameter cur_weight =
+              PsddParameter::CreateFromDecimal(
+                  cur_case_it->second.lr_cut_edges_freq[cur_edge]) +
+              alpha;
+          cur_terminal_parameter.lr_cut_edges_freq[cur_edge] = cur_weight;
+          cur_terminal_total += cur_weight;
+        }
+        cur_terminal_parameter.zero_lr_cut_edge_freq /= cur_terminal_total;
+        for (Edge *cur_edge : lr_cut_edges_) {
+          cur_terminal_parameter.lr_cut_edges_freq[cur_edge] /=
+              cur_terminal_total;
+        }
+      }
+      terminal_parameter_[cur_external_edge] =
+          std::move(cur_terminal_parameter);
+    }
+    // Nonterminal route parameter
+    for (auto i_it = external_edges_.begin(); i_it != external_edges_.end();
+         ++i_it) {
+      auto j_it = i_it;
+      std::advance(j_it, 1);
+      NodeSize first_entering_node = i_it->second;
+      Edge *first_external_edge = i_it->first;
+      for (; j_it != external_edges_.end(); ++j_it) {
+        NodeSize second_entering_node = j_it->second;
+        Edge *second_external_edge = j_it->first;
+        auto edge_pair =
+            make_edge_pair(first_external_edge, second_external_edge);
+        InternalClusterParameterPerCase cur_non_terminal_parameter;
+        if (first_entering_node == second_entering_node) {
+          cur_non_terminal_parameter.zero_lr_cut_edge_freq =
+              PsddParameter::CreateFromDecimal(1.0);
+        } else {
+          auto cur_learning_state_it =
+              learning_state.param_learning_state_non_terminal.find(edge_pair);
+          if (cur_learning_state_it ==
+              learning_state.param_learning_state_non_terminal.end()) {
+            // Set a uniform parameters of all lr_cut_edges.
+            auto lr_cut_edge_size = lr_cut_edges_.size();
+            PsddParameter uniform_pr =
+                PsddParameter::CreateFromDecimal(1.0 / lr_cut_edge_size);
+            for (Edge *cur_edge : lr_cut_edges_) {
+              cur_non_terminal_parameter.lr_cut_edges_freq[cur_edge] =
+                  uniform_pr;
+            }
+          } else {
+            PsddParameter cur_non_terminal_total =
+                PsddParameter::CreateFromDecimal(0);
+            for (Edge *cur_edge : lr_cut_edges_) {
+              PsddParameter cur_weight = PsddParameter::CreateFromDecimal(
+                                             cur_learning_state_it->second
+                                                 .lr_cut_edges_freq[cur_edge]) +
+                                         alpha;
+              cur_non_terminal_parameter.lr_cut_edges_freq[cur_edge] =
+                  cur_weight;
+              cur_non_terminal_total += cur_weight;
+            }
+            for (Edge *cur_edge : lr_cut_edges_) {
+              cur_non_terminal_parameter.lr_cut_edges_freq[cur_edge] /=
+                  cur_non_terminal_total;
+            }
+          }
+        }
+        non_terminal_parameter_[edge_pair] = cur_non_terminal_parameter;
+      }
+    }
+  } else {
+    // Leaf cluster
+    // Internal routes
+    assert(internal_path_constraint_ != nullptr);
+    std::unordered_map<int32_t, BatchedPsddValue> internal_training_values =
+        GetDataMapFromRoute(
+            learning_state.param_learning_state_internal.routes_in_leaf_cluster,
+            lr_cut_edges_, *edge_variable_map_);
+    leaf_internal_path_distribution_ = manager->LearnPsddParameters(
+        internal_path_constraint_, internal_training_values,
+        learning_state.param_learning_state_internal.routes_in_leaf_cluster
+            .size(),
+        alpha, /*flag_index=*/1);
+    // Terminal route parameter
+    for (auto external_edge_pair : external_edges_) {
+      Edge *cur_external_edge = external_edge_pair.first;
+      std::unordered_map<int32_t, BatchedPsddValue> terminal_training_values;
+      size_t data_size = 0;
+      auto cur_case_it =
+          learning_state.param_learning_state_terminal.find(cur_external_edge);
+      if (cur_case_it != learning_state.param_learning_state_terminal.end()) {
+        terminal_training_values =
+            GetDataMapFromRoute(cur_case_it->second.routes_in_leaf_cluster,
+                                lr_cut_edges_, *edge_variable_map_);
+        data_size = cur_case_it->second.routes_in_leaf_cluster.size();
+      }
+      PsddNode *cur_terminal_trained_psdd = manager->LearnPsddParameters(
+          terminal_path_constraint_[cur_external_edge],
+          terminal_training_values, data_size, alpha, /*flag_index=*/1);
+      leaf_terminal_path_distribution_[cur_external_edge] =
+          cur_terminal_trained_psdd;
+    }
+    // Nonterminal route parameter
+    for (auto i_it = external_edges_.begin(); i_it != external_edges_.end();
+         ++i_it) {
+      auto j_it = i_it;
+      std::advance(j_it, 1);
+      Edge *first_external_edge = i_it->first;
+      for (; j_it != external_edges_.end(); ++j_it) {
+        Edge *second_external_edge = j_it->first;
+        auto edge_pair =
+            make_edge_pair(first_external_edge, second_external_edge);
+        std::unordered_map<int32_t, BatchedPsddValue>
+            non_terminal_training_values;
+        size_t data_size = 0;
+        auto cur_learning_state_it =
+            learning_state.param_learning_state_non_terminal.find(edge_pair);
+        if (cur_learning_state_it !=
+            learning_state.param_learning_state_non_terminal.end()) {
+          non_terminal_training_values = GetDataMapFromRoute(
+              cur_learning_state_it->second.routes_in_leaf_cluster,
+              lr_cut_edges_, *edge_variable_map_);
+          data_size =
+              cur_learning_state_it->second.routes_in_leaf_cluster.size();
+        }
+        PsddNode *cur_non_terminal_trained_psdd = manager->LearnPsddParameters(
+            non_terminal_path_constraint_[edge_pair],
+            non_terminal_training_values, data_size, alpha, /*flag_index=*/1);
+        leaf_non_terminal_path_distribution_[edge_pair] =
+            cur_non_terminal_trained_psdd;
+      }
+    }
+  }
+}
+
+std::set<NodeSize> MapCluster::EntryPoints() const {
+  std::set<NodeSize> entry_points;
+  for (const auto &external_entry : external_edges_) {
+    if (entry_points.find(external_entry.second) == entry_points.end()) {
+      entry_points.insert(external_entry.second);
+    }
+  }
+  return entry_points;
+}
+
+std::set<std::pair<NodeSize, NodeSize>>
+MapCluster::EntryPointPairsForNonTerminalPaths() const {
+  std::set<std::pair<NodeSize, NodeSize>> entering_points;
+  for (auto i_it = external_edges_.begin(); i_it != external_edges_.end();
+       ++i_it) {
+    auto j_it = i_it;
+    std::advance(j_it, 1);
+    NodeSize first_entering_node = i_it->second;
+    for (; j_it != external_edges_.end(); ++j_it) {
+      NodeSize second_entering_node = j_it->second;
+      std::pair<NodeSize, NodeSize> node_pair(
+          std::min(first_entering_node, second_entering_node),
+          std::max(first_entering_node, second_entering_node));
+      if (entering_points.find(node_pair) == entering_points.end()) {
+        entering_points.insert(node_pair);
+      }
+    }
+  }
+  return entering_points;
+}
+
+Probability
+MapCluster::Evaluate(const std::vector<std::vector<Edge *>> &routes) {
+  auto learning_state = UpdateParameterLearningStateSimple(routes);
+  double log_pr = 0;
+  if (left_child_ != nullptr) {
+    // internal cases
+    const auto &internal_states = learning_state.param_learning_state_internal;
+    log_pr += internal_states.left_internal_freq *
+              internal_parameter_.left_internal_freq.parameter();
+    log_pr += internal_states.right_internal_freq *
+              internal_parameter_.right_internal_freq.parameter();
+    for (const auto &edge_freq_pair : internal_states.lr_cut_edges_freq) {
+      log_pr += edge_freq_pair.second *
+                internal_parameter_.lr_cut_edges_freq[edge_freq_pair.first]
+                    .parameter();
+    }
+    // terminal case
+    const auto &terminal_states = learning_state.param_learning_state_terminal;
+    for (const auto &external_edge_and_state_pair : terminal_states) {
+      const auto &cur_param =
+          terminal_parameter_[external_edge_and_state_pair.first];
+      log_pr += external_edge_and_state_pair.second.zero_lr_cut_edge_freq *
+                cur_param.zero_lr_cut_edge_freq.parameter();
+      for (const auto &lr_cut_edge_and_state_pair :
+           external_edge_and_state_pair.second.lr_cut_edges_freq) {
+        log_pr +=
+            lr_cut_edge_and_state_pair.second *
+            cur_param.lr_cut_edges_freq.find(lr_cut_edge_and_state_pair.first)
+                ->second.parameter();
+      }
+    }
+    // non terminal case
+    const auto &non_terminal_states =
+        learning_state.param_learning_state_non_terminal;
+    for (const auto &external_edge_pair_and_state_pair : non_terminal_states) {
+      const auto &cur_param =
+          non_terminal_parameter_[external_edge_pair_and_state_pair.first];
+      if (cur_param.zero_lr_cut_edge_freq ==
+          PsddParameter::CreateFromDecimal(0)) {
+        // Two external edges enter different regions
+        for (const auto &lr_cut_edge_and_state_pair :
+             external_edge_pair_and_state_pair.second.lr_cut_edges_freq) {
+          log_pr += lr_cut_edge_and_state_pair.second *
+                    cur_param.lr_cut_edges_freq
+                        .find(lr_cut_edge_and_state_pair.first)
+                        ->second.parameter();
+        }
+      } else {
+        // Two external edges enter the same region
+        log_pr +=
+            external_edge_pair_and_state_pair.second.zero_lr_cut_edge_freq *
+            cur_param.zero_lr_cut_edge_freq.parameter();
+      }
+    }
+    return Probability::CreateFromLog(log_pr);
+  } else {
+    // Leaf region
+    // internal routes
+    double log_pr = 0;
+    const auto &internal_state = learning_state.param_learning_state_internal;
+    std::bitset<MAX_VAR> variable_mask;
+    for (Edge *cur_edge : lr_cut_edges_) {
+      variable_mask.set(edge_variable_map_->find(cur_edge)->second);
+    }
+    for (const auto &cur_route : internal_state.routes_in_leaf_cluster) {
+      std::bitset<MAX_VAR> instantiation;
+      for (Edge *cur_edge : cur_route) {
+        instantiation.set(edge_variable_map_->find(cur_edge)->second);
+      }
+      auto cur_pr = psdd_node_util::Evaluate(variable_mask, instantiation,
+                                             leaf_internal_path_distribution_);
+      log_pr += cur_pr.parameter();
+    }
+    // terminal routes
+    const auto &terminal_states = learning_state.param_learning_state_terminal;
+    for (const auto &external_edge_and_state_pair : terminal_states) {
+      PsddNode *cur_leaf_param =
+          leaf_terminal_path_distribution_[external_edge_and_state_pair.first];
+      for (const auto &cur_route :
+           external_edge_and_state_pair.second.routes_in_leaf_cluster) {
+        std::bitset<MAX_VAR> instantiation;
+        for (Edge *cur_edge : cur_route) {
+          instantiation.set(edge_variable_map_->find(cur_edge)->second);
+        }
+        auto cur_pr = psdd_node_util::Evaluate(variable_mask, instantiation,
+                                               cur_leaf_param);
+        log_pr += cur_pr.parameter();
+      }
+    }
+    // non terminal case
+    const auto &non_terminal_states =
+        learning_state.param_learning_state_non_terminal;
+    for (const auto &external_edge_pair_and_state_pair : non_terminal_states) {
+      PsddNode *cur_leaf_param =
+          leaf_non_terminal_path_distribution_[external_edge_pair_and_state_pair
+                                                   .first];
+      for (const auto &cur_route :
+           external_edge_pair_and_state_pair.second.routes_in_leaf_cluster) {
+        std::bitset<MAX_VAR> instantiation;
+        for (Edge *cur_edge : cur_route) {
+          instantiation.set(edge_variable_map_->find(cur_edge)->second);
+        }
+        auto cur_pr = psdd_node_util::Evaluate(variable_mask, instantiation,
+                                               cur_leaf_param);
+        log_pr += cur_pr.parameter();
+      }
+    }
+    return Probability::CreateFromLog(log_pr);
   }
 }
 

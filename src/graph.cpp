@@ -217,4 +217,25 @@ Graph::IncidenceMapFromEdgeList(const std::vector<Edge *> &edges) {
   }
   return incidence_map;
 }
+
+Edge *Graph::EdgeFromJson(const json &input_json) {
+  if (node_pair_to_edges_.size() == 0 && edges_.size() != 0) {
+    node_pair_to_edges_ = NodePairToEdges();
+  }
+  const NodeSize first_node = input_json.find("x").value();
+  const NodeSize second_node = input_json.find("y").value();
+  std::string input_edge_name = input_json.find("name").value();
+  std::pair<NodeSize, NodeSize> node_pair_key = std::make_pair(
+      std::min(first_node, second_node), std::max(first_node, second_node));
+  auto result_edges = node_pair_to_edges_.find(node_pair_key);
+  assert(result_edges != node_pair_to_edges_.end());
+  Edge *matched_edge = nullptr;
+  for (Edge *cur_edge : result_edges->second) {
+    if (cur_edge->edge_name() == input_edge_name) {
+      matched_edge = cur_edge;
+      break;
+    }
+  }
+  return matched_edge != nullptr ? matched_edge : result_edges->second[0];
+}
 } // namespace hierarchical_map

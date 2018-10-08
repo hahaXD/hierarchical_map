@@ -13,6 +13,13 @@
 extern "C" {
 #include <sdd/sddapi.h>
 }
+
+#ifndef STR
+#define STR(x) VAR(x)
+#endif
+#ifndef VAR
+#define VAR(x) #x
+#endif
 using nlohmann::json;
 namespace {
 using hierarchical_map::MapNetwork;
@@ -48,13 +55,11 @@ json GenerateSmall3LayerSpec() {
 } // namespace
 
 TEST(BINARY_HIERARCHICAL_MAP_COMPILER_TEST, SANITY_CHECK_TEST) {
+  std::string src_directory(STR(SRC_DIRECTORY));
   auto json_spec = GenerateSmall3LayerSpec();
   MapNetwork *network = MapNetwork::MapNetworkFromJsonSpec(json_spec);
-  network->SetGraphillionCompiler(
-      "/Users/yujias/Documents/hierarchical_map_compiler/script/"
-      "compile_graph.py",
-      "/Users/yujias/Documents/hierarchical_map_compiler/script/test", 4);
-  auto result = network->CompileConstraint();
+  auto result = network->CompileConstraint(
+      src_directory + "/script/compile_graph.py", "/tmp", 4);
   PsddNode *psdd_node = result.first;
   EXPECT_EQ(
       psdd_node_util::ModelCount(psdd_node_util::SerializePsddNodes(psdd_node))

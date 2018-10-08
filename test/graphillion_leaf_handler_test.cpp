@@ -7,6 +7,7 @@
 #include <hierarchical_map/graph.h>
 #include <hierarchical_map/leaf_constraint_handler.h>
 #include <hierarchical_map/map_cluster.h>
+#include <memory>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -14,6 +15,14 @@
 extern "C" {
 #include <sdd/sddapi.h>
 }
+
+#ifndef STR
+#define STR(x) VAR(x)
+#endif
+#ifndef VAR
+#define VAR(x) #x
+#endif
+
 namespace {
 using hierarchical_map::Edge;
 using hierarchical_map::LeafConstraintHandler;
@@ -58,11 +67,10 @@ TEST(GRAPHILLION_LEAF_HANDLER_TEST, SIMPLE_TEST) {
   const auto &edges = cluster_edge_pair.second;
   unordered_map<Edge *, SddLiteral> edge_variable_map;
   unordered_map<SddLiteral, Edge *> variable_to_edge_map;
-  unordered_map<MapCluster *, set<NodeSize>> terminal_nodes_per_cluster;
-  terminal_nodes_per_cluster[cluster_edge_pair.first] = {1, 3};
-  unordered_map<MapCluster *, set<pair<NodeSize, NodeSize>>>
-      non_terminal_nodes_per_cluster;
-  non_terminal_nodes_per_cluster[cluster_edge_pair.first] = {{1, 3}};
+  std::unique_ptr<MapCluster> other_cluster_1 = std::make_unique<MapCluster>(
+      1, "1", std::unordered_set<NodeSize>(4), nullptr, nullptr);
+  std::unique_ptr<MapCluster> other_cluster_2 = std::make_unique<MapCluster>(
+      2, "2", std::unordered_set<NodeSize>(5), nullptr, nullptr);
   SddLiteral psdd_literal_index = 10;
   for (Edge *cur_edge : edges) {
     edge_variable_map[cur_edge] = psdd_literal_index++;
@@ -73,11 +81,9 @@ TEST(GRAPHILLION_LEAF_HANDLER_TEST, SIMPLE_TEST) {
   local_vtree_per_cluster[cluster_edge_pair.first] = local_vtree;
   LeafConstraintHandler *graphillion_handler =
       LeafConstraintHandler::GetGraphillionSddLeafConstraintHandler(
-          &edge_variable_map, &variable_to_edge_map, &local_vtree_per_cluster,
-          &terminal_nodes_per_cluster, &non_terminal_nodes_per_cluster,
-          "/Users/yujias/Documents/hierarchical_map_compiler/script/"
-          "compile_graph.py",
-          "/Users/yujias/Documents/hierarchical_map_compiler/script/test", 2);
+          edge_variable_map, variable_to_edge_map, local_vtree_per_cluster,
+          std::string(STR(SRC_DIRECTORY)) + "/script/compile_graph.py", "/tmp",
+          2);
   const auto &non_terminal = graphillion_handler->non_terminal_path_constraint(
       cluster_edge_pair.first);
   const auto &terminal =
