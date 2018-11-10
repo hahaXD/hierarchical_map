@@ -241,4 +241,25 @@ MapNetwork::GetMapClustersByName() const {
   }
   return map_clusters_by_name;
 }
+
+std::pair<PsddNode *, PsddManager *> MapNetwork::InferenceByCompilation() {
+  unordered_map<Edge *, MapCluster *> edge_cluster_map = EdgeClusterMap();
+  // start timer
+  auto compilation_start_time = get_time::now();
+  for (MapCluster *cur_cluster : clusters_) {
+    if (cur_cluster->left_child() != nullptr) {
+      cur_cluster->InitConstraint(
+          &cluster_variable_map_, &edge_variable_map_, psdd_manager_,
+          local_vtree_per_cluster_[cur_cluster], leaf_constraint_handler_);
+    }
+  }
+  auto compilation_end_time = get_time::now();
+  std::cout << "Compilation time : "
+            << std::chrono::duration_cast<ms>(compilation_end_time -
+                                              compilation_start_time)
+                   .count()
+            << " ms " << std::endl;
+  MapCluster *root = clusters_.back();
+  return std::make_pair(root->internal_path_constraint(), psdd_manager_);
+}
 } // namespace hierarchical_map

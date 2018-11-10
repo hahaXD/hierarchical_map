@@ -42,8 +42,10 @@ public:
   void LearnWithRoutes(const std::string &graphillion_script,
                        const std::string &tmp_dir, int thread_num,
                        const std::vector<std::vector<Edge *>> &routes);
+
   // Inference methods.
   Probability Evaluate(const std::vector<std::vector<Edge *>> &target_routes);
+  std::pair<PsddNode *, PsddManager *> InferenceByCompilation();
 
 private:
   std::vector<MapCluster *> clusters_;

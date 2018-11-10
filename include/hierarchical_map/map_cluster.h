@@ -203,6 +203,9 @@ protected:
   std::map<Edge *, PsddNode *> leaf_terminal_path_distribution_;
   std::map<std::pair<Edge *, Edge *>, PsddNode *>
       leaf_non_terminal_path_distribution_;
+  // flags
+  // indicates whether the cluster has been learned from data yet.
+  bool learned_;
 };
 
 } // namespace hierarchical_map

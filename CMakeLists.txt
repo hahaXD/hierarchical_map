@@ -21,7 +21,10 @@ add_library(hmc ${HIERARCHICAL_MAP_COMPILER_SRC_FILES})
 add_executable(hmc_test ${HIERARCHICAL_MAP_COMPILER_TEST_SRC_FILES})
 add_executable(hmc_main main.cpp)
 add_executable(hmc_classifier classifier.cpp)
+add_executable(bhm_learn_and_compile bhm_learn_and_compile.cpp)
 target_link_libraries(hmc_test hmc ${psdd} ${sdd} gmp ${gtest} ${gtest_main} ${gmock} ${gmock_main} ${htd} pthread)
 target_link_libraries(hmc_main hmc ${psdd} ${sdd} gmp ${htd})
 target_link_libraries(hmc_classifier hmc ${psdd} ${sdd} gmp ${htd})
+target_link_libraries(bhm_learn_and_compile hmc ${psdd} ${sdd} gmp ${htd})
+
 

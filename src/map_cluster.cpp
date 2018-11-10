@@ -224,7 +224,7 @@ MapCluster::MapCluster(ClusterSize cluster_index, std::string cluster_name,
     : cluster_index_(cluster_index), cluster_name_(std::move(cluster_name)),
       nodes_(std::move(nodes)), left_child_(left_child),
       right_child_(right_child), external_edges_(), lr_cut_edges_(),
-      leaf_internal_path_distribution_(nullptr) {}
+      leaf_internal_path_distribution_(nullptr), learned_(false) {}
 const std::unordered_set<NodeSize> &MapCluster::nodes() const { return nodes_; }
 
 Vtree *MapCluster::GenerateLocalVtree(
@@ -505,7 +505,11 @@ MapCluster::ConstructInternalPathConstraintForInternalCluster() const {
       {PsddParameter::CreateFromDecimal(1)}, 0);
   primes.push_back(left_only_prime);
   subs.push_back(left_only_sub);
-  params.push_back(PsddParameter::CreateFromDecimal(1));
+  if (learned_) {
+    params.push_back(internal_parameter_.left_internal_freq);
+  } else {
+    params.push_back(PsddParameter::CreateFromDecimal(1));
+  }
   // right only
   PsddNode *right_only_prime =
       OneHopTerm(pm_, local_vtree_, right_cluster_variable_it->second);
@@ -516,7 +520,11 @@ MapCluster::ConstructInternalPathConstraintForInternalCluster() const {
       {PsddParameter::CreateFromDecimal(1)}, 0);
   primes.push_back(right_only_prime);
   subs.push_back(right_only_sub);
-  params.push_back(PsddParameter::CreateFromDecimal(1));
+  if (learned_) {
+    params.push_back(internal_parameter_.right_internal_freq);
+  } else {
+    params.push_back(PsddParameter::CreateFromDecimal(1));
+  }
   // including exactly one of the internal edge
   for (Edge *cur_internal_edge : lr_cut_edges_) {
     auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
@@ -532,7 +540,13 @@ MapCluster::ConstructInternalPathConstraintForInternalCluster() const {
         {PsddParameter::CreateFromDecimal(1)}, 0);
     primes.push_back(cur_prime);
     subs.push_back(cur_sub);
-    params.push_back(PsddParameter::CreateFromDecimal(1));
+    if (learned_) {
+      params.push_back(
+          internal_parameter_.lr_cut_edges_freq.find(cur_internal_edge)
+              ->second);
+    } else {
+      params.push_back(PsddParameter::CreateFromDecimal(1));
+    }
   }
   PsddNode *result_node =
       pm_->GetConformedPsddDecisionNode(primes, subs, params, 0);
@@ -545,8 +559,9 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
   vector<PsddNode *> primes;
   vector<PsddNode *> subs;
   vector<PsddParameter> params;
+  auto terminal_parameter_it = terminal_parameter_.find(edge);
   if (external_edge_it->second == 0) {
-    // the external edge enters the leaf region
+    // the external edge enters the left region
     // case one none of the internal edges are used
     PsddNode *first_prime = NegativeTerm(pm_, local_vtree_);
     PsddNode *first_sub_child_prime =
@@ -557,7 +572,12 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
         {PsddParameter::CreateFromDecimal(1)}, 0);
     primes.push_back(first_prime);
     subs.push_back(first_sub);
-    params.push_back(PsddParameter::CreateFromDecimal(1));
+    if (learned_) {
+      assert(terminal_parameter_it != terminal_parameter_.end());
+      params.push_back(terminal_parameter_it->second.zero_lr_cut_edge_freq);
+    } else {
+      params.push_back(PsddParameter::CreateFromDecimal(1));
+    }
     // case two exactly one of the internal edges used
     for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
@@ -573,7 +593,14 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
           {PsddParameter::CreateFromDecimal(1)}, 0);
       primes.push_back(cur_prime);
       subs.push_back(cur_sub);
-      params.push_back(PsddParameter::CreateFromDecimal(1));
+      if (learned_) {
+        assert(terminal_parameter_it != terminal_parameter_.end());
+        params.push_back(terminal_parameter_it->second.lr_cut_edges_freq
+                             .find(cur_internal_edge)
+                             ->second);
+      } else {
+        params.push_back(PsddParameter::CreateFromDecimal(1));
+      }
     }
   } else {
     assert(external_edge_it->second == 1);
@@ -588,7 +615,12 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
         {PsddParameter::CreateFromDecimal(1)}, 0);
     primes.push_back(first_prime);
     subs.push_back(first_sub);
-    params.push_back(PsddParameter::CreateFromDecimal(1));
+    if (learned_) {
+      assert(terminal_parameter_it != terminal_parameter_.end());
+      params.push_back(terminal_parameter_it->second.zero_lr_cut_edge_freq);
+    } else {
+      params.push_back(PsddParameter::CreateFromDecimal(1));
+    }
     // case two exactly one of the internal edges used
     for (Edge *cur_internal_edge : lr_cut_edges_) {
       auto cur_internal_edge_it = edge_variable_map_->find(cur_internal_edge);
@@ -604,7 +636,14 @@ PsddNode *MapCluster::ConstructTerminalPathConstraintForInternalCluster(
           {PsddParameter::CreateFromDecimal(1)}, 0);
       primes.push_back(cur_prime);
       subs.push_back(cur_sub);
-      params.push_back(PsddParameter::CreateFromDecimal(1));
+      if (learned_) {
+        assert(terminal_parameter_it != terminal_parameter_.end());
+        params.push_back(terminal_parameter_it->second.lr_cut_edges_freq
+                             .find(cur_internal_edge)
+                             ->second);
+      } else {
+        params.push_back(PsddParameter::CreateFromDecimal(1));
+      }
     }
   }
   PsddNode *result = pm_->GetConformedPsddDecisionNode(primes, subs, params, 0);
@@ -618,6 +657,8 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
   auto edge_2_it = external_edges_.find(edge_2);
   assert(edge_1_it != external_edges_.end() &&
          edge_2_it != external_edges_.end());
+  auto non_terminal_parameter_it =
+      non_terminal_parameter_.find(make_edge_pair(edge_1, edge_2));
   vector<PsddNode *> primes;
   vector<PsddNode *> subs;
   vector<PsddParameter> params;
@@ -647,7 +688,14 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
           {PsddParameter::CreateFromDecimal(1)}, 0);
       primes.push_back(cur_prime);
       subs.push_back(cur_sub);
-      params.push_back(PsddParameter::CreateFromDecimal(1));
+      if (learned_) {
+        assert(non_terminal_parameter_it != non_terminal_parameter_.end());
+        params.push_back(non_terminal_parameter_it->second.lr_cut_edges_freq
+                             .find(cur_internal_edge)
+                             ->second);
+      } else {
+        params.push_back(PsddParameter::CreateFromDecimal(1));
+      }
     }
   } else if (edge_1_it->second == 1 && edge_2_it->second == 0) {
     for (Edge *cur_internal_edge : lr_cut_edges_) {
@@ -664,7 +712,14 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
           {PsddParameter::CreateFromDecimal(1)}, 0);
       primes.push_back(cur_prime);
       subs.push_back(cur_sub);
-      params.push_back(PsddParameter::CreateFromDecimal(1));
+      if (learned_) {
+        assert(non_terminal_parameter_it != non_terminal_parameter_.end());
+        params.push_back(non_terminal_parameter_it->second.lr_cut_edges_freq
+                         .find(cur_internal_edge)
+                         ->second);
+      } else {
+        params.push_back(PsddParameter::CreateFromDecimal(1));
+      }
     }
   } else {
     assert(edge_1_it->second == 1 && edge_2_it->second == 1);
@@ -929,6 +984,8 @@ ParameterLearningState MapCluster::UpdateParameterLearningStateSimple(
 
 void MapCluster::LearnParameters(const std::vector<std::vector<Edge *>> &routes,
                                  PsddManager *manager, PsddParameter alpha) {
+  // updates the learning flags.
+  learned_ = true;
   auto learning_state = UpdateParameterLearningStateSimple(routes);
   if (left_child_ != nullptr) {
     // Learn parameters in internal cluster
