@@ -453,23 +453,43 @@ void MapCluster::InitConstraint(
 }
 
 PsddNode *MapCluster::internal_path_constraint() const {
-  return internal_path_constraint_;
+  if (left_child_ == nullptr && learned_) {
+    // returns the learned psdd distribution.
+    return leaf_internal_path_distribution_;
+  } else {
+    return internal_path_constraint_;
+  }
 }
 
 PsddNode *MapCluster::terminal_path_constraint(Edge *entering_edge) const {
-  auto entering_edge_it = terminal_path_constraint_.find(entering_edge);
-  assert(entering_edge_it != terminal_path_constraint_.end());
-  return entering_edge_it->second;
+  if (left_child_ == nullptr && learned_) {
+    // returns the learned psdd distribution.
+    auto entering_edge_it =
+        leaf_terminal_path_distribution_.find(entering_edge);
+    assert(entering_edge_it != leaf_terminal_path_distribution_.end());
+    return entering_edge_it->second;
+  } else {
+    auto entering_edge_it = terminal_path_constraint_.find(entering_edge);
+    assert(entering_edge_it != terminal_path_constraint_.end());
+    return entering_edge_it->second;
+  }
 }
 
 PsddNode *
 MapCluster::non_terminal_path_constraint(Edge *entering_edge_1,
                                          Edge *entering_edge_2) const {
-  std::pair<Edge *, Edge *> key(std::min(entering_edge_1, entering_edge_2),
-                                std::max(entering_edge_1, entering_edge_2));
-  auto key_it = non_terminal_path_constraint_.find(key);
-  assert(key_it != non_terminal_path_constraint_.end());
-  return key_it->second;
+  if (left_child_ == nullptr && learned_) {
+    // returns the learned psdd distribution.
+    auto key = make_edge_pair(entering_edge_1, entering_edge_2);
+    auto key_it = leaf_non_terminal_path_distribution_.find(key);
+    assert(key_it != leaf_non_terminal_path_distribution_.end());
+    return key_it->second;
+  } else {
+    auto key = make_edge_pair(entering_edge_1, entering_edge_2);
+    auto key_it = non_terminal_path_constraint_.find(key);
+    assert(key_it != non_terminal_path_constraint_.end());
+    return key_it->second;
+  }
 }
 
 PsddNode *MapCluster::empty_path_constraint() const {
@@ -715,8 +735,8 @@ PsddNode *MapCluster::ConstructNonTerminalPathConstraintForInternalCluster(
       if (learned_) {
         assert(non_terminal_parameter_it != non_terminal_parameter_.end());
         params.push_back(non_terminal_parameter_it->second.lr_cut_edges_freq
-                         .find(cur_internal_edge)
-                         ->second);
+                             .find(cur_internal_edge)
+                             ->second);
       } else {
         params.push_back(PsddParameter::CreateFromDecimal(1));
       }

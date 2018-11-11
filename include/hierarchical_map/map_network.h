@@ -31,6 +31,11 @@ public:
   CompileConstraint(const std::string &graphillion_script,
                     const std::string &tmp_dir, int thread_num);
 
+  // Returns the mapping between edge and the edge index
+  const std::unordered_map<Edge *, SddLiteral> &edge_variable_map() const {
+    return edge_variable_map_;
+  }
+
   // Compiler methods
   void
   CompileLeafClustersUsingGraphillion(const std::string &graphillion_script,
