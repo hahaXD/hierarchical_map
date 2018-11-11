@@ -171,6 +171,7 @@ def mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_e
 if __name__ == "__main__" :
     if len(sys.argv) <= 3:
         print ("quality_exp.py <hierarchical_map_filename> <network_prefix> <psdd_binary>")
+        sys.exit(1)
     bhm_network_filename = sys.argv[1]
     network_file_prefix = sys.argv[2]
     psdd_binary = sys.argv[3]
