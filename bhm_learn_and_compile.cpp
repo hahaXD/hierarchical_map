@@ -41,7 +41,7 @@ void SaveEdgeVariableMapToJsonFile(
     const std::string &json_filename) {
   json result;
   for (const auto &edge_index_pair : edge_variable_map) {
-    result[edge_index_pair.second] = edge_index_pair.first->to_json();
+    result[std::to_string(edge_index_pair.second)] = edge_index_pair.first->to_json();
   }
   std::ofstream o(json_filename.c_str());
   o << std::setw(4) << result << std::endl;
