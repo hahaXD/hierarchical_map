@@ -204,7 +204,7 @@ if __name__ == "__main__" :
     tl = []
     hd = []
     for test_route in test_routes[:10]:
-        actual_remaining_route, predicted_remaining_route = mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_neighboring_edge_indexes, "/tmp/", psdd_binary, psdd_filename, vtree_filename)
+        actual_remaining_route, predicted_remaining_route = mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_neighboring_edge_indexes, network_file_prefix, psdd_binary, psdd_filename, vtree_filename)
         distance_calculator = DistanceMetricsCalculator (actual_remaining_route, predicted_remaining_route, bhm_network["nodes_location"])
         dsns.append(distance_calculator.get_dsn())
         tl.append(distance_calculator.get_trip_length_distance_normalized())
