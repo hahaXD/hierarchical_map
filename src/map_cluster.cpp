@@ -26,6 +26,20 @@ using std::unordered_map;
 using std::unordered_set;
 using std::vector;
 
+uintmax_t CountPsddFreeParameter(PsddNode *node) {
+  auto nodes = psdd_node_util::SerializePsddNodes(node);
+  auto count = 0;
+  for (PsddNode *cur_node : nodes) {
+    if (cur_node->node_type() == DECISION_NODE_TYPE) {
+      count += cur_node->psdd_decision_node()->primes().size() - 1;
+    }
+    if (cur_node->node_type() == TOP_NODE_TYPE) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 std::unordered_map<int32_t, BatchedPsddValue> GetDataMapFromRoute(
     const std::vector<std::vector<Edge *>> &routes,
     const std::unordered_set<Edge *> &internal_edges,
@@ -1329,6 +1343,36 @@ MapCluster::Evaluate(const std::vector<std::vector<Edge *>> &routes) {
       }
     }
     return Probability::CreateFromLog(log_pr);
+  }
+}
+uintmax_t MapCluster::FreeParameterCounts() const {
+  if (left_child_ == nullptr) {
+    // count for leaf cluster
+    uintmax_t cur_count = 0;
+    cur_count += CountPsddFreeParameter(leaf_internal_path_distribution_);
+    for (const auto &pair : leaf_terminal_path_distribution_) {
+      cur_count += CountPsddFreeParameter(pair.second);
+    }
+    for (const auto &pair : leaf_non_terminal_path_distribution_) {
+      cur_count += CountPsddFreeParameter(pair.second);
+    }
+    return cur_count;
+  } else {
+    // count for internal cluster
+    uintmax_t cur_count = 0;
+    cur_count += lr_cut_edges_.size() + 1;
+    // count for terminal
+    cur_count += external_edges_.size() * lr_cut_edges_.size();
+    // count for non terminal
+    for (const auto &pair : non_terminal_parameter_) {
+      if (external_edges_.find(pair.first.first)->second ==
+          external_edges_.find(pair.first.second)->second) {
+        continue;
+      } else {
+        cur_count += lr_cut_edges_.size() - 1;
+      }
+    }
+    return cur_count;
   }
 }
 

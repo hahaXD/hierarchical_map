@@ -10,6 +10,7 @@ extern "C" {
 
 namespace {
 using hierarchical_map::MapNetwork;
+  using hierarchical_map::MapCluster;
 }
 
 int main(int argc, const char *argv[]) {
@@ -33,6 +34,12 @@ int main(int argc, const char *argv[]) {
   std::cout << "Vtree filename : " << vtree_filename << std::endl;
   MapNetwork *network =
       MapNetwork::MapNetworkFromJsonSpecFile(map_filename.c_str());
+  uintmax_t num = 0;
+  for (MapCluster* cur_cluster : network->clusters()){
+    num += cur_cluster->FreeParameterCounts();
+  }
+  std::cout << "Free parameters" << num << std::endl;
+  /*
   auto result =
       network->CompileConstraint(graph_hopper_script, tmp_dir, thread_num);
   std::cout << "Model Count"
@@ -42,5 +49,6 @@ int main(int argc, const char *argv[]) {
             << std::endl;
   psdd_node_util::WritePsddToFile(result.first, sdd_filename.c_str());
   sdd_vtree_save(vtree_filename.c_str(), result.second->vtree());
+  */
   return 0;
 }

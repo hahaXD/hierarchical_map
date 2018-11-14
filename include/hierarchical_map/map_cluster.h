@@ -168,6 +168,7 @@ public:
     return edge_variable_map_;
   }
 
+  uintmax_t FreeParameterCounts () const;
 protected:
   PsddNode *ConstructEmptyPathConstraintForInternalCluster() const;
   PsddNode *ConstructInternalPathConstraintForInternalCluster() const;
