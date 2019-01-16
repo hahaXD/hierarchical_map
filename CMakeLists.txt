@@ -6,6 +6,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_FLAGS "-DSRC_DIRECTORY=${CMAKE_SOURCE_DIR}")
 if(APPLE)
   link_directories(lib/darwin)
+  include_directories(/usr/local/include/)
+  link_directories(/usr/local/lib/)
   set(htd "libhtd.0.dylib")
 endif(APPLE)
 
