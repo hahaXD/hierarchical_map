@@ -26,8 +26,7 @@
 // THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-//
-// Author: wan@google.com (Zhanyong Wan)
+
 
 // Google Mock - a framework for writing C++ mock classes.
 //
@@ -35,18 +34,31 @@
 // Mock.  They are subject to change without notice, so please DO NOT
 // USE THEM IN USER CODE.
 
+// GOOGLETEST_CM0002 DO NOT DELETE
+
 #ifndef GMOCK_INCLUDE_GMOCK_INTERNAL_GMOCK_INTERNAL_UTILS_H_
 #define GMOCK_INCLUDE_GMOCK_INTERNAL_GMOCK_INTERNAL_UTILS_H_
 
 #include <stdio.h>
 #include <ostream>  // NOLINT
 #include <string>
-#include "gmock/internal/gmock-generated-internal-utils.h"
 #include "gmock/internal/gmock-port.h"
 #include "gtest/gtest.h"
 
 namespace testing {
+
+template <typename>
+class Matcher;
+
 namespace internal {
+
+// Silence MSVC C4100 (unreferenced formal parameter) and
+// C4805('==': unsafe mix of type 'const int' and type 'const bool')
+#ifdef _MSC_VER
+# pragma warning(push)
+# pragma warning(disable:4100)
+# pragma warning(disable:4805)
+#endif
 
 // Joins a vector of strings as if they are fields of a tuple; returns
 // the joined string.
@@ -83,25 +95,11 @@ inline const typename Pointer::element_type* GetRawPointer(const Pointer& p) {
 template <typename Element>
 inline Element* GetRawPointer(Element* p) { return p; }
 
-// This comparator allows linked_ptr to be stored in sets.
-template <typename T>
-struct LinkedPtrLessThan {
-  bool operator()(const ::testing::internal::linked_ptr<T>& lhs,
-                  const ::testing::internal::linked_ptr<T>& rhs) const {
-    return lhs.get() < rhs.get();
-  }
-};
-
-// Symbian compilation can be done with wchar_t being either a native
-// type or a typedef.  Using Google Mock with OpenC without wchar_t
-// should require the definition of _STLP_NO_WCHAR_T.
-//
 // MSVC treats wchar_t as a native type usually, but treats it as the
 // same as unsigned short when the compiler option /Zc:wchar_t- is
 // specified.  It defines _NATIVE_WCHAR_T_DEFINED symbol when wchar_t
 // is a native type.
-#if (GTEST_OS_SYMBIAN && defined(_STLP_NO_WCHAR_T)) || \
-    (defined(_MSC_VER) && !defined(_NATIVE_WCHAR_T_DEFINED))
+#if defined(_MSC_VER) && !defined(_NATIVE_WCHAR_T_DEFINED)
 // wchar_t is a typedef.
 #else
 # define GMOCK_WCHAR_T_IS_NATIVE_ 1
@@ -336,7 +334,20 @@ GTEST_API_ bool LogIsVisible(LogSeverity severity);
 GTEST_API_ void Log(LogSeverity severity, const std::string& message,
                     int stack_frames_to_skip);
 
-// TODO(wan@google.com): group all type utilities together.
+// A marker class that is used to resolve parameterless expectations to the
+// correct overload. This must not be instantiable, to prevent client code from
+// accidentally resolving to the overload; for example:
+//
+//    ON_CALL(mock, Method({}, nullptr))...
+//
+class WithoutMatchers {
+ private:
+  WithoutMatchers() {}
+  friend GTEST_API_ WithoutMatchers GetWithoutMatchers();
+};
+
+// Internal use only: access the singleton instance of WithoutMatchers.
+GTEST_API_ WithoutMatchers GetWithoutMatchers();
 
 // Type traits.
 
@@ -437,39 +448,17 @@ class StlContainerView<Element[N]> {
   static const_reference ConstReference(const Element (&array)[N]) {
     // Ensures that Element is not a const type.
     testing::StaticAssertTypeEq<Element, RawElement>();
-#if GTEST_OS_SYMBIAN
-    // The Nokia Symbian compiler confuses itself in template instantiation
-    // for this call without the cast to Element*:
-    // function call '[testing::internal::NativeArray<char *>].NativeArray(
-    //     {lval} const char *[4], long, testing::internal::RelationToSource)'
-    //     does not match
-    // 'testing::internal::NativeArray<char *>::NativeArray(
-    //     char *const *, unsigned int, testing::internal::RelationToSource)'
-    // (instantiating: 'testing::internal::ContainsMatcherImpl
-    //     <const char * (&)[4]>::Matches(const char * (&)[4]) const')
-    // (instantiating: 'testing::internal::StlContainerView<char *[4]>::
-    //     ConstReference(const char * (&)[4])')
-    // (and though the N parameter type is mismatched in the above explicit
-    // conversion of it doesn't help - only the conversion of the array).
-    return type(const_cast<Element*>(&array[0]), N,
-                RelationToSourceReference());
-#else
     return type(array, N, RelationToSourceReference());
-#endif  // GTEST_OS_SYMBIAN
   }
   static type Copy(const Element (&array)[N]) {
-#if GTEST_OS_SYMBIAN
-    return type(const_cast<Element*>(&array[0]), N, RelationToSourceCopy());
-#else
     return type(array, N, RelationToSourceCopy());
-#endif  // GTEST_OS_SYMBIAN
   }
 };
 
 // This specialization is used when RawContainer is a native array
 // represented as a (pointer, size) tuple.
 template <typename ElementPointer, typename Size>
-class StlContainerView< ::testing::tuple<ElementPointer, Size> > {
+class StlContainerView< ::std::tuple<ElementPointer, Size> > {
  public:
   typedef GTEST_REMOVE_CONST_(
       typename internal::PointeeOf<ElementPointer>::type) RawElement;
@@ -477,11 +466,12 @@ class StlContainerView< ::testing::tuple<ElementPointer, Size> > {
   typedef const type const_reference;
 
   static const_reference ConstReference(
-      const ::testing::tuple<ElementPointer, Size>& array) {
-    return type(get<0>(array), get<1>(array), RelationToSourceReference());
+      const ::std::tuple<ElementPointer, Size>& array) {
+    return type(std::get<0>(array), std::get<1>(array),
+                RelationToSourceReference());
   }
-  static type Copy(const ::testing::tuple<ElementPointer, Size>& array) {
-    return type(get<0>(array), get<1>(array), RelationToSourceCopy());
+  static type Copy(const ::std::tuple<ElementPointer, Size>& array) {
+    return type(std::get<0>(array), std::get<1>(array), RelationToSourceCopy());
   }
 };
 
@@ -510,9 +500,8 @@ struct BooleanConstant {};
 
 // Emit an assertion failure due to incorrect DoDefault() usage. Out-of-lined to
 // reduce code size.
-void IllegalDoDefault(const char* file, int line);
+GTEST_API_ void IllegalDoDefault(const char* file, int line);
 
-#if GTEST_LANG_CXX11
 // Helper types for Apply() below.
 template <size_t... Is> struct int_pack { typedef int_pack type; };
 
@@ -538,7 +527,43 @@ auto Apply(F&& f, Tuple&& args)
   return ApplyImpl(std::forward<F>(f), std::forward<Tuple>(args),
                    make_int_pack<std::tuple_size<Tuple>::value>());
 }
+
+// Template struct Function<F>, where F must be a function type, contains
+// the following typedefs:
+//
+//   Result:               the function's return type.
+//   Arg<N>:               the type of the N-th argument, where N starts with 0.
+//   ArgumentTuple:        the tuple type consisting of all parameters of F.
+//   ArgumentMatcherTuple: the tuple type consisting of Matchers for all
+//                         parameters of F.
+//   MakeResultVoid:       the function type obtained by substituting void
+//                         for the return type of F.
+//   MakeResultIgnoredValue:
+//                         the function type obtained by substituting Something
+//                         for the return type of F.
+template <typename T>
+struct Function;
+
+template <typename R, typename... Args>
+struct Function<R(Args...)> {
+  using Result = R;
+  static constexpr size_t ArgumentCount = sizeof...(Args);
+  template <size_t I>
+  using Arg = ElemFromList<I, typename MakeIndexSequence<sizeof...(Args)>::type,
+                           Args...>;
+  using ArgumentTuple = std::tuple<Args...>;
+  using ArgumentMatcherTuple = std::tuple<Matcher<Args>...>;
+  using MakeResultVoid = void(Args...);
+  using MakeResultIgnoredValue = IgnoredValue(Args...);
+};
+
+template <typename R, typename... Args>
+constexpr size_t Function<R(Args...)>::ArgumentCount;
+
+#ifdef _MSC_VER
+# pragma warning(pop)
 #endif
+
 }  // namespace internal
 }  // namespace testing
 
